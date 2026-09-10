@@ -1,0 +1,6 @@
+shiny
+shinywidgets
+plotly<6
+duckdb
+pandas
+uvicorn<0.46

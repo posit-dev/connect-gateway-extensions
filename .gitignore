@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# rsconnect deploy artifacts. The manifest is regenerated at deploy time; commit
+# it only if this app moves to git-backed deployment.
+manifest.json
+rsconnect-python/
