@@ -34,7 +34,9 @@ Every dashboard query then runs against local data. Restart the app, or press
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -64,6 +66,9 @@ if not CONNECT_API_KEY:
     )
 
 _EXPORT_ENDPOINT = f"{CONNECT_SERVER.rstrip('/')}/{EXPORT_PATH}"
+# The gateway pricing endpoints share the export's base. `pricing` is the
+# vendored litellm default catalog; `models` is the admin override table.
+_GATEWAY_BASE = f"{CONNECT_SERVER.rstrip('/')}/__api__/v1/system/gateway"
 _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 
 _lock = threading.Lock()
@@ -81,6 +86,84 @@ _con.execute(
 
 # Set by load(): when the table was read, the window it covers, and its size.
 INFO: dict = {}
+
+# Set by load(): token prices keyed by (provider, model), each value a tuple of
+# US dollars per million tokens (input, output, cache write, cache read). The
+# provider is the catalog name ("anthropic", "aws.bedrock"); the model is the
+# family that gateway_events.model carries. None means the server does not serve
+# the pricing endpoint, or the fetch failed; the caller then falls back to its
+# own list-price table.
+PRICES: dict | None = None
+
+_MODEL_DATE_REV = re.compile(r"(-\d{8})?(-v\d+(:\d+)?)?$")
+
+
+def _model_family(raw: str) -> str:
+    """Reduce a raw model id to the family that gateway_events.model carries.
+
+    This must produce the same value as the `model` column in _SHAPE, so a
+    catalogue price keyed by a dated, prefixed id still matches a request: drop
+    any prefix up to the last dot, then a trailing -YYYYMMDD date and a -vN[:N]
+    revision.
+    """
+    after_dot = raw.rsplit(".", 1)[-1]
+    return _MODEL_DATE_REV.sub("", after_dot)
+
+
+def _get_json(url: str):
+    """GET one gateway endpoint as JSON, or None if it is absent or fails.
+
+    A server without the pricing endpoints answers 404, which arrives here as
+    an HTTPError; every transport or decode failure returns None so that a
+    missing price catalogue never blocks a data load.
+    """
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Authorization": f"Key {CONNECT_API_KEY}", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def _rows_to_prices(rows) -> dict:
+    """Key override or catalog rows by (provider, model family)."""
+    return {
+        (row["provider"], _model_family(row["model"])): (
+            row["input_usd_per_million_tokens"],
+            row["output_usd_per_million_tokens"],
+            row["cache_creation_usd_per_million_tokens"],
+            row["cache_read_usd_per_million_tokens"],
+        )
+        for row in rows
+    }
+
+
+def _fetch_prices() -> dict | None:
+    """Merge the default catalog with the admin overrides, or return None.
+
+    The catalog gives every model a default; the override table replaces the
+    price for whichever (provider, model) it names. The server does not merge
+    them, so this does. A missing catalog returns None; a missing override
+    table just leaves the defaults in place.
+    """
+    pricing = _get_json(f"{_GATEWAY_BASE}/pricing")
+    if not pricing:
+        return None
+    prices = {}
+    for prov in pricing.get("providers", []):
+        prices.update(
+            _rows_to_prices(
+                dict(m, provider=prov["provider"]) for m in prov.get("models", [])
+            )
+        )
+    overrides = _get_json(f"{_GATEWAY_BASE}/models")
+    if overrides:
+        prices.update(_rows_to_prices(overrides.get("overrides", [])))
+    return prices or None
 
 
 def _window() -> tuple[str, str, str]:
@@ -300,12 +383,21 @@ def load() -> dict:
         # refusal all as transport errors.
         raise _explain(url, e) from e
 
+    # Fetched outside the lock: it is network I/O, and the assignment is atomic.
+    # A failure leaves PRICES as it was, so the caller keeps the last good
+    # catalog rather than dropping to its fallback on one bad refresh.
+    global PRICES
+    fetched = _fetch_prices()
+    if fetched is not None:
+        PRICES = fetched
+
     INFO.update(
         loaded_at=datetime.now(timezone.utc),
         window_from=window_from,
         window_to=window_to,
         as_of=as_of,
         rows=rows,
+        priced_models=None if PRICES is None else len(PRICES),
     )
     return INFO
 

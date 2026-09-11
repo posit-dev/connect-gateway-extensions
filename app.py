@@ -19,8 +19,8 @@ which of the three a row was charged to.
 Layout follows one question per row. Each row asks a question and answers it
 on two dimensions: per day, and in total.
 
-Spend is tokens × the fixed list-price lookup below — swap in negotiated rates
-if your contract differs from list.
+Spend is tokens × the price catalog Connect serves (see est_cost); a fallback
+table below prices the models when the server does not serve the catalog.
 
 Run:  .venv/bin/shiny run app:app --port 8000
 """
@@ -41,11 +41,12 @@ import theme
 import usage
 from theme import apply, card_num, card_usd, color, empty_fig, fmt_num, fmt_usd
 
-# Fixed list-price lookup ($/Mtok: input, output, cache write, cache read).
-# Anthropic first-party list rates — Bedrock and Vertex are partner-priced and
-# differ, so treat the money columns as indicative. A model missing from here
-# costs $0 and silently understates spend, so keep it in step with the models
-# the gateway actually sees.
+# Fallback list-price lookup ($/Mtok: input, output, cache write, cache read).
+# est_cost() prefers the live catalog Connect serves (usage.PRICES); this table
+# is used only when the server does not serve the pricing endpoint or the fetch
+# fails. Anthropic first-party list rates — a model missing from here costs $0
+# and silently understates spend, so keep it in step with the models the
+# gateway actually sees.
 EST_PRICES = {
     "claude-fable-5": (10.00, 50.00, 12.50, 1.00),
     "claude-opus-5": (5.00, 25.00, 6.25, 0.50),
@@ -62,15 +63,86 @@ EST_PRICES = {
     "gpt-5-mini": (0.25, 2.00, 0.0, 0.025),
 }
 
-EST_COST = (
-    "CASE model "
-    + " ".join(
-        f"WHEN '{m}' THEN ((input_tokens - cache_read_tokens - cache_creation_tokens) * {i}"
-        f" + cache_creation_tokens * {cw} + cache_read_tokens * {cr} + output_tokens * {o})"
-        for m, (i, o, cw, cr) in EST_PRICES.items()
+# The export writes the provider as "anthropic" or "bedrock"; the price catalog
+# names Bedrock "aws.bedrock". Match either so a provider-keyed rate still fires.
+_PROVIDER_ALIASES = {"anthropic": ("anthropic",), "aws.bedrock": ("bedrock", "aws.bedrock")}
+
+
+def _rate_term(i: float, o: float, cw: float, cr: float) -> str:
+    """The spend for one row at these four $/Mtok rates, before the /1e6.
+
+    float() coerces each rate, so a string or null price cannot enter the SQL as
+    a bare token.
+    """
+    return (
+        f"((input_tokens - cache_read_tokens - cache_creation_tokens) * {float(i)}"
+        f" + cache_creation_tokens * {float(cw)} + cache_read_tokens * {float(cr)}"
+        f" + output_tokens * {float(o)})"
     )
-    + " ELSE 0 END / 1e6"
-)
+
+
+def _sql_str(s: str) -> str:
+    """One value as a SQL string literal, with embedded quotes doubled.
+
+    Provider and model names come from the pricing endpoint, so the CASE text
+    must not assume they are quote-free.
+    """
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def _build_est_cost(prices: dict | None) -> str:
+    """The est_cost SQL for one price catalog (or the fallback table)."""
+    if not prices:
+        whens = " ".join(
+            f"WHEN model = {_sql_str(m)} THEN {_rate_term(i, o, cw, cr)}"
+            for m, (i, o, cw, cr) in EST_PRICES.items()
+        )
+        return f"CASE {whens} ELSE 0 END / 1e6"
+
+    specific, model_default = [], {}
+    for (provider, model), (i, o, cw, cr) in prices.items():
+        names = ", ".join(
+            _sql_str(a) for a in _PROVIDER_ALIASES.get(provider, (provider,))
+        )
+        specific.append(
+            f"WHEN provider IN ({names}) AND model = {_sql_str(model)}"
+            f" THEN {_rate_term(i, o, cw, cr)}"
+        )
+        if provider == "anthropic":
+            model_default[model] = (i, o, cw, cr)
+    # Model-only fallback, tried after every provider-keyed branch.
+    fallback = [
+        f"WHEN model = {_sql_str(m)} THEN {_rate_term(*r)}"
+        for m, r in model_default.items()
+    ]
+    return f"CASE {' '.join(specific + fallback)} ELSE 0 END / 1e6"
+
+
+# (prices object the SQL was built from, the SQL). The cache holds the object
+# itself, not id(prices): a freed catalog can pass its id() to a new object and
+# cause a wrong hit, but an `is` test on the object cannot.
+_EST_COST_CACHE: tuple = (object(), "")
+
+
+def est_cost() -> str:
+    """Estimated spend per row, as a SQL expression over gateway_events.
+
+    The SQL is rebuilt only when the catalog changes. A refresh replaces
+    usage.PRICES with a new object, which misses the cache and forces one
+    rebuild; every call in between reuses the string. With a catalog, the price
+    comes from (provider, model), and a request whose provider is not priced
+    falls back to the model's Anthropic rate, so a provider-name mismatch does
+    not read $0. Without a catalog, the fallback table prices by model alone.
+    """
+    global _EST_COST_CACHE
+    prices = usage.PRICES
+    cached_prices, cached_sql = _EST_COST_CACHE
+    if cached_prices is prices:
+        return cached_sql
+    sql = _build_est_cost(prices)
+    _EST_COST_CACHE = (prices, sql)
+    return sql
+
 
 TOKEN_COUNT = "(input_tokens + output_tokens)"
 
@@ -152,7 +224,7 @@ def measure_of(f: dict) -> dict:
             "noun": "tokens",
         }
     return {
-        "expr": EST_COST,
+        "expr": est_cost(),
         "fmt": fmt_usd,
         "card_fmt": card_usd,
         "axis": "est. USD / day",
@@ -165,6 +237,19 @@ def measure_of(f: dict) -> dict:
 
 def plural(n, word: str) -> str:
     return f"{word}s" if n != 1 else word
+
+
+def price_note(info: dict) -> str:
+    """Where the spend estimate's prices came from, for the sidebar.
+
+    `priced_models` is None when Connect served no catalog and est_cost fell
+    back to the built-in table, so the reader can tell a live price from a
+    stale one.
+    """
+    n = info.get("priced_models")
+    if n is None:
+        return "prices: built-in fallback (no live catalog)"
+    return f"prices: {n} {plural(n, 'model')} from Connect catalog"
 
 
 def fmt_limit(v: float) -> str:
@@ -810,6 +895,8 @@ def server(input, output, session):
             # The watermark is what makes the read reproducible, so it belongs
             # beside the row count rather than only in the module doc.
             f"pinned at ingest ≤ {info['as_of'][11:16]} UTC",
+            ui.br(),
+            price_note(info),
             class_="sidebar-note load-note",
         )
 
@@ -982,7 +1069,7 @@ def server(input, output, session):
     @render.ui
     def kpis():
         f = flt()
-        r = usage.q(f"""SELECT COUNT(*) requests, COALESCE(SUM({EST_COST}),0) est,
+        r = usage.q(f"""SELECT COUNT(*) requests, COALESCE(SUM({est_cost()}),0) est,
                             COALESCE(SUM({TOKEN_COUNT}),0) tokens,
                             COUNT(DISTINCT username) users,
                             COUNT(DISTINCT content_guid) contents,
@@ -1154,7 +1241,7 @@ def server(input, output, session):
 
     def unnamed_note(f) -> ui.Tag | None:
         """How much of the range the grouping axis cannot name."""
-        r = usage.q(f"""SELECT COUNT(*) n, ROUND(SUM({EST_COST}),2) v
+        r = usage.q(f"""SELECT COUNT(*) n, ROUND(SUM({est_cost()}),2) v
                         FROM gateway_events
                         WHERE {where(f)} AND {f["dim"]} IS NULL""").iloc[0]
         if not r.n:
@@ -1186,10 +1273,10 @@ def server(input, output, session):
         f = flt()
         limit = f["limit"]
         return usage.q(f"""SELECT {f["dim"]} AS principal,
-                               ROUND(SUM({EST_COST}),2) AS est_spend_usd,
-                               ROUND(100 * SUM({EST_COST}) / {limit}, 0) AS pct_of_limit,
-                               CASE WHEN SUM({EST_COST}) > {limit} THEN '⛔ over'
-                                    WHEN SUM({EST_COST}) >= 0.8 * {limit}
+                               ROUND(SUM({est_cost()}),2) AS est_spend_usd,
+                               ROUND(100 * SUM({est_cost()}) / {limit}, 0) AS pct_of_limit,
+                               CASE WHEN SUM({est_cost()}) > {limit} THEN '⛔ over'
+                                    WHEN SUM({est_cost()}) >= 0.8 * {limit}
                                          THEN '⚠ approaching'
                                     ELSE '✓ under' END AS status,
                                COUNT(*) AS requests
@@ -1266,7 +1353,7 @@ def server(input, output, session):
                    COALESCE(ANY_VALUE({f["dim"]}), 'unnamed') AS principal,
                    MIN(ts) AS started,
                    GREATEST(date_diff('second', MIN(ts), MAX(ts)) / 60.0, 0.5) AS duration_min,
-                   COUNT(*) AS calls, SUM({EST_COST}) AS est
+                   COUNT(*) AS calls, SUM({est_cost()}) AS est
             FROM gateway_events
             WHERE {where(f)} AND conversation_id IS NOT NULL
             GROUP BY 1
@@ -1412,7 +1499,7 @@ def server(input, output, session):
                              {via}
                              COUNT(*) AS requests,
                              SUM({TOKEN_COUNT}) AS tokens,
-                             ROUND(SUM({EST_COST}),2) AS est_spend_usd,
+                             ROUND(SUM({est_cost()}),2) AS est_spend_usd,
                              SUM(CASE WHEN is_weekend THEN 1 ELSE 0 END) AS weekend_requests,
                              strftime(MIN(day), '%Y-%m-%d') AS first_seen,
                              strftime(MAX(day), '%Y-%m-%d') AS last_seen
@@ -1494,7 +1581,7 @@ def server(input, output, session):
     def weekend_principals_df() -> pd.DataFrame:
         f = flt()
         return usage.q(f"""SELECT {f["dim"]} AS principal,
-                             ROUND(SUM({EST_COST}),2) AS est_spend_usd,
+                             ROUND(SUM({est_cost()}),2) AS est_spend_usd,
                              SUM({TOKEN_COUNT}) AS tokens,
                              COUNT(*) AS requests,
                              strftime(MIN(day), '%Y-%m-%d') AS first,
@@ -1576,7 +1663,7 @@ def server(input, output, session):
         return " AND ".join(conds)
 
     def records_sql(where_sql: str, limit: str = "") -> str:
-        cols = RECORD_COLS.replace("EST_COST_EXPR", EST_COST)
+        cols = RECORD_COLS.replace("EST_COST_EXPR", est_cost())
         return f"SELECT {cols} FROM gateway_events WHERE {where_sql} ORDER BY ts DESC{limit}"
 
     @reactive.calc
