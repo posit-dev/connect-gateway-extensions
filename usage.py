@@ -130,14 +130,21 @@ def _get_json(url: str):
         return None
 
 
-def _rates(row) -> tuple:
-    """The four $/Mtok rates from a catalog or override row, in cost order."""
-    return (
-        row["input_usd_per_million_tokens"],
-        row["output_usd_per_million_tokens"],
-        row["cache_creation_usd_per_million_tokens"],
-        row["cache_read_usd_per_million_tokens"],
-    )
+def _rates(row) -> tuple | None:
+    """The four $/Mtok rates from a catalog or override row, in cost order.
+
+    Returns None when a rate is missing or not a number, so the caller can drop
+    the row. The rates go into SQL text later, so a bad value must stop here.
+    """
+    try:
+        return (
+            float(row["input_usd_per_million_tokens"]),
+            float(row["output_usd_per_million_tokens"]),
+            float(row["cache_creation_usd_per_million_tokens"]),
+            float(row["cache_read_usd_per_million_tokens"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 # Bedrock lists a separate price for each cross-region inference profile (us.,
@@ -183,14 +190,18 @@ def _catalog_prices(pricing) -> dict:
     per_region: dict = {}  # (provider, region, family) -> rates, region != ""
     best: dict = {}        # (provider, family) -> (rank, rates), for the "" default
     for prov in pricing.get("providers", []):
+        provider = prov.get("provider")
         for m in prov.get("models", []):
-            family = _model_family(m["model"])
-            region = _model_region(m["model"])
+            model = m.get("model")
             rates = _rates(m)
+            if provider is None or model is None or rates is None:
+                continue
+            family = _model_family(model)
+            region = _model_region(model)
             if region:
-                per_region.setdefault((prov["provider"], region, family), rates)
-            rank = _region_rank(m["model"])
-            fam = (prov["provider"], family)
+                per_region.setdefault((provider, region, family), rates)
+            rank = _region_rank(model)
+            fam = (provider, family)
             if fam not in best or rank < best[fam][0]:
                 best[fam] = (rank, rates)
     prices = dict(per_region)
@@ -205,16 +216,25 @@ def _fetch_prices() -> dict | None:
     The catalog gives every model a default; the override table replaces the
     price for whichever (provider, model) it names. The server does not merge
     them, so this does. A missing catalog returns None; a missing override
-    table just leaves the defaults in place.
+    table just leaves the defaults in place. An unexpected shape also returns
+    None: a non-numeric rate, a renamed or missing field, or a list where an
+    object was expected. The caller then keeps its fallback table rather than
+    crash the load.
     """
     pricing = _get_json(f"{_GATEWAY_BASE}/pricing")
     if not pricing:
         return None
-    prices = _catalog_prices(pricing)
-    overrides = _get_json(f"{_GATEWAY_BASE}/models")
-    if overrides:
-        for row in overrides.get("overrides", []):
-            prices[(row["provider"], _model_region(row["model"]), _model_family(row["model"]))] = _rates(row)
+    try:
+        prices = _catalog_prices(pricing)
+        overrides = _get_json(f"{_GATEWAY_BASE}/models")
+        if overrides:
+            for row in overrides.get("overrides", []):
+                provider, model, rates = row.get("provider"), row.get("model"), _rates(row)
+                if provider is None or model is None or rates is None:
+                    continue
+                prices[(provider, _model_region(model), _model_family(model))] = rates
+    except (AttributeError, TypeError):
+        return None
     return prices or None
 
 
