@@ -91,7 +91,12 @@ def _sql_str(s: str) -> str:
 
 
 def _build_est_cost(prices: dict | None) -> str:
-    """The est_cost SQL for one price catalog (or the fallback table)."""
+    """The est_cost SQL for one price catalog (or the fallback table).
+
+    The CASE tries the most specific branch first: the request's own region,
+    then the provider's base rate for the model, then -- for a provider the
+    catalog does not price -- the model's Anthropic rate, then $0.
+    """
     if not prices:
         whens = " ".join(
             f"WHEN model = {_sql_str(m)} THEN {_rate_term(i, o, cw, cr)}"
@@ -99,23 +104,30 @@ def _build_est_cost(prices: dict | None) -> str:
         )
         return f"CASE {whens} ELSE 0 END / 1e6"
 
-    specific, model_default = [], {}
-    for (provider, model), (i, o, cw, cr) in prices.items():
+    region_whens, base_whens, model_default = [], [], {}
+    for (provider, region, model), (i, o, cw, cr) in prices.items():
         names = ", ".join(
             _sql_str(a) for a in _PROVIDER_ALIASES.get(provider, (provider,))
         )
-        specific.append(
-            f"WHEN provider IN ({names}) AND model = {_sql_str(model)}"
-            f" THEN {_rate_term(i, o, cw, cr)}"
-        )
-        if provider == "anthropic":
-            model_default[model] = (i, o, cw, cr)
+        if region:
+            region_whens.append(
+                f"WHEN provider IN ({names}) AND region = {_sql_str(region)}"
+                f" AND model = {_sql_str(model)} THEN {_rate_term(i, o, cw, cr)}"
+            )
+        else:
+            base_whens.append(
+                f"WHEN provider IN ({names}) AND model = {_sql_str(model)}"
+                f" THEN {_rate_term(i, o, cw, cr)}"
+            )
+            if provider == "anthropic":
+                model_default[model] = (i, o, cw, cr)
     # Model-only fallback, tried after every provider-keyed branch.
     fallback = [
         f"WHEN model = {_sql_str(m)} THEN {_rate_term(*r)}"
         for m, r in model_default.items()
     ]
-    return f"CASE {' '.join(specific + fallback)} ELSE 0 END / 1e6"
+    whens = region_whens + base_whens + fallback
+    return f"CASE {' '.join(whens)} ELSE 0 END / 1e6"
 
 
 # (prices object the SQL was built from, the SQL). The cache holds the object
@@ -130,9 +142,10 @@ def est_cost() -> str:
     The SQL is rebuilt only when the catalog changes. A refresh replaces
     usage.PRICES with a new object, which misses the cache and forces one
     rebuild; every call in between reuses the string. With a catalog, the price
-    comes from (provider, model), and a request whose provider is not priced
-    falls back to the model's Anthropic rate, so a provider-name mismatch does
-    not read $0. Without a catalog, the fallback table prices by model alone.
+    comes from (provider, region, model): the request's own region if it has a
+    listed rate, else the provider's base rate, else the model's Anthropic rate,
+    so a provider-name mismatch does not read $0. Without a catalog, the fallback
+    table prices by model alone.
     """
     global _EST_COST_CACHE
     prices = usage.PRICES

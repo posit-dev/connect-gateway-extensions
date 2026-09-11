@@ -87,12 +87,13 @@ _con.execute(
 # Set by load(): when the table was read, the window it covers, and its size.
 INFO: dict = {}
 
-# Set by load(): token prices keyed by (provider, model), each value a tuple of
-# US dollars per million tokens (input, output, cache write, cache read). The
-# provider is the catalog name ("anthropic", "aws.bedrock"); the model is the
-# family that gateway_events.model carries. None means the server does not serve
-# the pricing endpoint, or the fetch failed; the caller then falls back to its
-# own list-price table.
+# Set by load(): token prices keyed by (provider, region, model), each value a
+# tuple of US dollars per million tokens (input, output, cache write, cache
+# read). The provider is the catalog name ("anthropic", "aws.bedrock"); the
+# region is a Bedrock inference-region token ("us", "eu", ...) or "" for the
+# base rate; the model is the family that gateway_events.model carries. None
+# means the server does not serve the pricing endpoint, or the fetch failed; the
+# caller then falls back to its own list-price table.
 PRICES: dict | None = None
 
 _MODEL_DATE_REV = re.compile(r"(-\d{8})?(-v\d+(:\d+)?)?$")
@@ -129,17 +130,73 @@ def _get_json(url: str):
         return None
 
 
-def _rows_to_prices(rows) -> dict:
-    """Key override or catalog rows by (provider, model family)."""
-    return {
-        (row["provider"], _model_family(row["model"])): (
-            row["input_usd_per_million_tokens"],
-            row["output_usd_per_million_tokens"],
-            row["cache_creation_usd_per_million_tokens"],
-            row["cache_read_usd_per_million_tokens"],
-        )
-        for row in rows
-    }
+def _rates(row) -> tuple:
+    """The four $/Mtok rates from a catalog or override row, in cost order."""
+    return (
+        row["input_usd_per_million_tokens"],
+        row["output_usd_per_million_tokens"],
+        row["cache_creation_usd_per_million_tokens"],
+        row["cache_read_usd_per_million_tokens"],
+    )
+
+
+# Bedrock lists a separate price for each cross-region inference profile (us.,
+# eu., apac., ...), a few percent above the base/global list rate. The catalog
+# id and the raw request model both keep the region, so the app prices a request
+# at its own region's rate. When a region has no listed price the app falls back
+# to the base (un-prefixed) rate, else global -- see _catalog_prices.
+_REGIONS = {"us", "eu", "apac", "au", "jp", "global", "us-gov", "ca", "sa", "me"}
+
+
+def _region_rank(raw: str) -> int:
+    """Preference for one catalog id when several collapse to one family.
+
+    0 = no region prefix (the base list rate), 1 = global, 2 = a specific
+    region. The lowest rank wins, so the "" default is the base list rate.
+    """
+    first = raw.split(".", 1)[0]
+    if first not in _REGIONS:
+        return 0
+    return 1 if first == "global" else 2
+
+
+def _model_region(raw: str) -> str:
+    """The inference-region token of a catalog id, or "" when it has none.
+
+    A Bedrock profile prefixes the id with a region (us., eu., ...); every other
+    id has no prefix. Keep this in step with _region_rank and _REGIONS.
+    """
+    first = raw.split(".", 1)[0]
+    return first if first in _REGIONS else ""
+
+
+def _catalog_prices(pricing) -> dict:
+    """Rate per (provider, region, family), from the catalog.
+
+    `region` is the inference-region token (us, eu, ...) for a Bedrock profile,
+    or "" for the base id. Each region keeps its own list rate. The "" entry is
+    the default the app charges when a request's region has no price of its own:
+    the base list rate, else global -- the lowest _region_rank, chosen so it
+    never depends on catalog order. Dated snapshots of one region keep the first
+    seen.
+    """
+    per_region: dict = {}  # (provider, region, family) -> rates, region != ""
+    best: dict = {}        # (provider, family) -> (rank, rates), for the "" default
+    for prov in pricing.get("providers", []):
+        for m in prov.get("models", []):
+            family = _model_family(m["model"])
+            region = _model_region(m["model"])
+            rates = _rates(m)
+            if region:
+                per_region.setdefault((prov["provider"], region, family), rates)
+            rank = _region_rank(m["model"])
+            fam = (prov["provider"], family)
+            if fam not in best or rank < best[fam][0]:
+                best[fam] = (rank, rates)
+    prices = dict(per_region)
+    for (provider, family), (_rank, rates) in best.items():
+        prices[(provider, "", family)] = rates
+    return prices
 
 
 def _fetch_prices() -> dict | None:
@@ -153,16 +210,11 @@ def _fetch_prices() -> dict | None:
     pricing = _get_json(f"{_GATEWAY_BASE}/pricing")
     if not pricing:
         return None
-    prices = {}
-    for prov in pricing.get("providers", []):
-        prices.update(
-            _rows_to_prices(
-                dict(m, provider=prov["provider"]) for m in prov.get("models", [])
-            )
-        )
+    prices = _catalog_prices(pricing)
     overrides = _get_json(f"{_GATEWAY_BASE}/models")
     if overrides:
-        prices.update(_rows_to_prices(overrides.get("overrides", [])))
+        for row in overrides.get("overrides", []):
+            prices[(row["provider"], _model_region(row["model"]), _model_family(row["model"]))] = _rates(row)
     return prices or None
 
 
@@ -240,6 +292,16 @@ SELECT
     -- The exact strings the call carried, kept for audit evidence.
     request_model                                      AS request_model_raw,
     response_model                                     AS response_model_raw,
+    -- The cross-region inference profile the caller invoked, when there is one.
+    -- Bedrock prefixes the request model id with a region (us., eu., ...), which
+    -- sets the list price, so est_cost prices by it. request_model names the
+    -- profile; response_model can be empty on a failed call. Keep the prefix
+    -- only when it is a known region. Keep this set in step with usage._REGIONS.
+    CASE
+        WHEN split_part(COALESCE(NULLIF(request_model, ''), response_model), '.', 1)
+             IN ('us', 'eu', 'apac', 'au', 'jp', 'global', 'us-gov', 'ca', 'sa', 'me')
+        THEN split_part(COALESCE(NULLIF(request_model, ''), response_model), '.', 1)
+    END                                                AS region,
     integration_guid,
     -- How the call reached the provider. integration_auth_type is the flow the
     -- integration is configured for ("Viewer", "Service Account", "Environment
@@ -397,7 +459,9 @@ def load() -> dict:
         window_to=window_to,
         as_of=as_of,
         rows=rows,
-        priced_models=None if PRICES is None else len(PRICES),
+        priced_models=(
+            None if PRICES is None else len({(p, f) for (p, _region, f) in PRICES})
+        ),
     )
     return INFO
 
