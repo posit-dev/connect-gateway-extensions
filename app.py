@@ -832,10 +832,28 @@ def server(input, output, session):
     async def _(url: str):
         await session.bookmark.update_query_string(url)
 
+    _BOOKMARKABLE_INPUTS = {
+        "dark_mode",
+        "preset",
+        "measure",
+        "source",
+        "group_by",
+        "limit_usd",
+        "f_users",
+        "f_contents",
+        "f_providers",
+        "f_models",
+        "a_status",
+        "main_tabs",
+    }
+
     # Trigger bookmarking
     @reactive.effect
     @reactive.event(input.main_tabs, ignore_init=True)
     async def _():
+        session.bookmark.exclude = [
+            k for k in dir(input) if k not in _BOOKMARKABLE_INPUTS
+        ]
         await session.bookmark()
 
     # bumped by a refresh; every query depends on it through flt()
@@ -1016,8 +1034,8 @@ def server(input, output, session):
         df = usage.q(f"""SELECT day, {dim} AS k, SUM({m["expr"]}) v FROM gateway_events
                          WHERE {where(f)} AND {dim} IS NOT NULL
                          GROUP BY 1,2 ORDER BY 1""")
-        if df.empty:
-            return empty_fig(f["mode"])
+        if df.empty or not df.v.sum():
+            return empty_fig(f["mode"], f"No {m['noun']} recorded in this view")
         fig = go.Figure()
         label = dict(zip(order, chart_labels(dim, order)))
         for i, k in enumerate(order):
@@ -1033,8 +1051,9 @@ def server(input, output, session):
                 x=d.day,
                 y=d.v,
                 name=label[k],
-                mode="lines",
+                mode="lines+markers",
                 line={"width": 2, "color": c},
+                marker={"size": 5, "color": c},
                 hovertemplate=(
                     f"<b>{m['prefix']}%{{y:{m['tick']}}}</b> {k}<extra></extra>"
                 ),
@@ -1048,8 +1067,9 @@ def server(input, output, session):
         df = usage.q(f"""SELECT {dim} AS k, SUM({m["expr"]}) v, COUNT(*) req
                          FROM gateway_events WHERE {where(f)} AND {dim} IS NOT NULL
                          GROUP BY 1 ORDER BY 2 DESC LIMIT {limit}""").iloc[::-1]
+        df = df[df.v > 0]
         if df.empty:
-            return empty_fig(f["mode"])
+            return empty_fig(f["mode"], f"No {m['noun']} recorded in this view")
         colors = (
             [color(color_kind, k, f["mode"]) for k in df.k]
             if color_kind
@@ -1568,8 +1588,8 @@ def server(input, output, session):
         df = usage.q(f"""SELECT CASE WHEN is_weekend THEN 'weekend' ELSE 'weekday' END day_type,
                              SUM({m["expr"]}) v, COUNT(DISTINCT {f["dim"]}) principals
                       FROM gateway_events WHERE {where(f)} GROUP BY 1 ORDER BY 1 DESC""")
-        if df.empty:
-            return empty_fig(f["mode"])
+        if df.empty or not df.v.sum():
+            return empty_fig(f["mode"], f"No {m['noun']} recorded in this view")
         fig = go.Figure(
             go.Bar(
                 x=df.day_type,
