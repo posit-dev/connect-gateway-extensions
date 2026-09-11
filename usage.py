@@ -34,7 +34,9 @@ Every dashboard query then runs against local data. Restart the app, or press
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -64,6 +66,9 @@ if not CONNECT_API_KEY:
     )
 
 _EXPORT_ENDPOINT = f"{CONNECT_SERVER.rstrip('/')}/{EXPORT_PATH}"
+# The gateway pricing endpoints share the export's base. `pricing` is the
+# vendored litellm default catalog; `models` is the admin override table.
+_GATEWAY_BASE = f"{CONNECT_SERVER.rstrip('/')}/__api__/v1/system/gateway"
 _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 
 _lock = threading.Lock()
@@ -81,6 +86,156 @@ _con.execute(
 
 # Set by load(): when the table was read, the window it covers, and its size.
 INFO: dict = {}
+
+# Set by load(): token prices keyed by (provider, region, model), each value a
+# tuple of US dollars per million tokens (input, output, cache write, cache
+# read). The provider is the catalog name ("anthropic", "aws.bedrock"); the
+# region is a Bedrock inference-region token ("us", "eu", ...) or "" for the
+# base rate; the model is the family that gateway_events.model carries. None
+# means the server does not serve the pricing endpoint, or the fetch failed; the
+# caller then falls back to its own list-price table.
+PRICES: dict | None = None
+
+_MODEL_DATE_REV = re.compile(r"(-\d{8})?(-v\d+(:\d+)?)?$")
+
+
+def _model_family(raw: str) -> str:
+    """Reduce a raw model id to the family that gateway_events.model carries.
+
+    This must produce the same value as the `model` column in _SHAPE, so a
+    catalogue price keyed by a dated, prefixed id still matches a request: drop
+    any prefix up to the last dot, then a trailing -YYYYMMDD date and a -vN[:N]
+    revision.
+    """
+    after_dot = raw.rsplit(".", 1)[-1]
+    return _MODEL_DATE_REV.sub("", after_dot)
+
+
+def _get_json(url: str):
+    """GET one gateway endpoint as JSON, or None if it is absent or fails.
+
+    A server without the pricing endpoints answers 404, which arrives here as
+    an HTTPError; every transport or decode failure returns None so that a
+    missing price catalogue never blocks a data load.
+    """
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Authorization": f"Key {CONNECT_API_KEY}", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def _rates(row) -> tuple | None:
+    """The four $/Mtok rates from a catalog or override row, in cost order.
+
+    Returns None when a rate is missing or not a number, so the caller can drop
+    the row. The rates go into SQL text later, so a bad value must stop here.
+    """
+    try:
+        return (
+            float(row["input_usd_per_million_tokens"]),
+            float(row["output_usd_per_million_tokens"]),
+            float(row["cache_creation_usd_per_million_tokens"]),
+            float(row["cache_read_usd_per_million_tokens"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+# Bedrock lists a separate price for each cross-region inference profile (us.,
+# eu., apac., ...), a few percent above the base/global list rate. The catalog
+# id and the raw request model both keep the region, so the app prices a request
+# at its own region's rate. When a region has no listed price the app falls back
+# to the base (un-prefixed) rate, else global -- see _catalog_prices.
+_REGIONS = {"us", "eu", "apac", "au", "jp", "global", "us-gov", "ca", "sa", "me"}
+
+
+def _region_rank(raw: str) -> int:
+    """Preference for one catalog id when several collapse to one family.
+
+    0 = no region prefix (the base list rate), 1 = global, 2 = a specific
+    region. The lowest rank wins, so the "" default is the base list rate.
+    """
+    first = raw.split(".", 1)[0]
+    if first not in _REGIONS:
+        return 0
+    return 1 if first == "global" else 2
+
+
+def _model_region(raw: str) -> str:
+    """The inference-region token of a catalog id, or "" when it has none.
+
+    A Bedrock profile prefixes the id with a region (us., eu., ...); every other
+    id has no prefix. Keep this in step with _region_rank and _REGIONS.
+    """
+    first = raw.split(".", 1)[0]
+    return first if first in _REGIONS else ""
+
+
+def _catalog_prices(pricing) -> dict:
+    """Rate per (provider, region, family), from the catalog.
+
+    `region` is the inference-region token (us, eu, ...) for a Bedrock profile,
+    or "" for the base id. Each region keeps its own list rate. The "" entry is
+    the default the app charges when a request's region has no price of its own:
+    the base list rate, else global -- the lowest _region_rank, chosen so it
+    never depends on catalog order. Dated snapshots of one region keep the first
+    seen.
+    """
+    per_region: dict = {}  # (provider, region, family) -> rates, region != ""
+    best: dict = {}        # (provider, family) -> (rank, rates), for the "" default
+    for prov in pricing.get("providers", []):
+        provider = prov.get("provider")
+        for m in prov.get("models", []):
+            model = m.get("model")
+            rates = _rates(m)
+            if provider is None or model is None or rates is None:
+                continue
+            family = _model_family(model)
+            region = _model_region(model)
+            if region:
+                per_region.setdefault((provider, region, family), rates)
+            rank = _region_rank(model)
+            fam = (provider, family)
+            if fam not in best or rank < best[fam][0]:
+                best[fam] = (rank, rates)
+    prices = dict(per_region)
+    for (provider, family), (_rank, rates) in best.items():
+        prices[(provider, "", family)] = rates
+    return prices
+
+
+def _fetch_prices() -> dict | None:
+    """Merge the default catalog with the admin overrides, or return None.
+
+    The catalog gives every model a default; the override table replaces the
+    price for whichever (provider, model) it names. The server does not merge
+    them, so this does. A missing catalog returns None; a missing override
+    table just leaves the defaults in place. An unexpected shape also returns
+    None: a non-numeric rate, a renamed or missing field, or a list where an
+    object was expected. The caller then keeps its fallback table rather than
+    crash the load.
+    """
+    pricing = _get_json(f"{_GATEWAY_BASE}/pricing")
+    if not pricing:
+        return None
+    try:
+        prices = _catalog_prices(pricing)
+        overrides = _get_json(f"{_GATEWAY_BASE}/models")
+        if overrides:
+            for row in overrides.get("overrides", []):
+                provider, model, rates = row.get("provider"), row.get("model"), _rates(row)
+                if provider is None or model is None or rates is None:
+                    continue
+                prices[(provider, _model_region(model), _model_family(model))] = rates
+    except (AttributeError, TypeError):
+        return None
+    return prices or None
 
 
 def _window() -> tuple[str, str, str]:
@@ -157,6 +312,16 @@ SELECT
     -- The exact strings the call carried, kept for audit evidence.
     request_model                                      AS request_model_raw,
     response_model                                     AS response_model_raw,
+    -- The cross-region inference profile the caller invoked, when there is one.
+    -- Bedrock prefixes the request model id with a region (us., eu., ...), which
+    -- sets the list price, so est_cost prices by it. request_model names the
+    -- profile; response_model can be empty on a failed call. Keep the prefix
+    -- only when it is a known region. Keep this set in step with usage._REGIONS.
+    CASE
+        WHEN split_part(COALESCE(NULLIF(request_model, ''), response_model), '.', 1)
+             IN ('us', 'eu', 'apac', 'au', 'jp', 'global', 'us-gov', 'ca', 'sa', 'me')
+        THEN split_part(COALESCE(NULLIF(request_model, ''), response_model), '.', 1)
+    END                                                AS region,
     integration_guid,
     -- How the call reached the provider. integration_auth_type is the flow the
     -- integration is configured for ("Viewer", "Service Account", "Environment
@@ -300,12 +465,23 @@ def load() -> dict:
         # refusal all as transport errors.
         raise _explain(url, e) from e
 
+    # Fetched outside the lock: it is network I/O, and the assignment is atomic.
+    # A failure leaves PRICES as it was, so the caller keeps the last good
+    # catalog rather than dropping to its fallback on one bad refresh.
+    global PRICES
+    fetched = _fetch_prices()
+    if fetched is not None:
+        PRICES = fetched
+
     INFO.update(
         loaded_at=datetime.now(timezone.utc),
         window_from=window_from,
         window_to=window_to,
         as_of=as_of,
         rows=rows,
+        priced_models=(
+            None if PRICES is None else len({(p, f) for (p, _region, f) in PRICES})
+        ),
     )
     return INFO
 
