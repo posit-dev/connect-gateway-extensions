@@ -375,7 +375,10 @@ SELECT
     -- that authenticated with an ephemeral key, so it is null for a request a
     -- person made and for self-authenticating callers such as Bedrock.
     job_key,
-    session_id                                         AS conversation_id,
+    -- before we started storing conversation IDs this field was called
+    -- session_id and was always empty. there should never be both a session_id
+    -- and a conversation_id.
+    COLUMNS('^(conversation_id|session_id)$')          AS conversation_id,
     -- Where the call came from. The content fields are null for a request that
     -- did not originate in deployed content, which is what marks a Workbench
     -- session or a direct API caller.
