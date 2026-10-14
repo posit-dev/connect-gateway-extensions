@@ -84,6 +84,7 @@ PROVIDER_ORDER = [
     "openai",
     "bedrock",  # what the export writes for AWS Bedrock
     "aws.bedrock",
+    "aws.bedrock_mantle",
     "azure.openai",
     "google.vertex",
 ]

@@ -138,11 +138,12 @@ INFO: dict = {}
 
 # Set by load(): token prices keyed by (provider, region, model), each value a
 # tuple of US dollars per million tokens (input, output, cache write, cache
-# read). The provider is the catalog name ("anthropic", "aws.bedrock"); the
-# region is a Bedrock inference-region token ("us", "eu", ...) or "" for the
-# base rate; the model is the family that gateway_events.model carries. There
-# is no built-in price list: the first load() fails if the catalog cannot be
-# read, and a later failed refresh keeps the last good catalog.
+# read). The provider is the catalog name ("anthropic", "aws.bedrock",
+# "aws.bedrock_mantle"); the region is a Bedrock inference-region token ("us",
+# "eu", ...) or "" for the base rate; the model is the family that
+# gateway_events.model carries. There is no built-in price list: the first
+# load() fails if the catalog cannot be read, and a later failed refresh keeps
+# the last good catalog.
 PRICES: dict | None = None
 
 # Set by load(): the human-readable name of each content item, keyed by guid.
@@ -158,17 +159,22 @@ GROUP_MEMBERS: list[tuple[str, str, str]] = []
 
 _MODEL_DATE_REV = re.compile(r"(-\d{8})?(-v\d+(:\d+)?)?$")
 
+# The region (us., global., ...) and vendor (anthropic., openai., ...) prefixes
+# of a Bedrock model id: up to two leading segments of letters only. A model
+# name always has a digit or a hyphen, and it can have dots (openai.gpt-5.5),
+# so the match stops before it.
+_MODEL_PREFIX = re.compile(r"^(?:[a-z]+\.){0,2}")
+
 
 def _model_family(raw: str) -> str:
     """Reduce a raw model id to the family that gateway_events.model carries.
 
     This must produce the same value as the `model` column in _SHAPE, so a
     catalogue price keyed by a dated, prefixed id still matches a request: drop
-    any prefix up to the last dot, then a trailing -YYYYMMDD date and a -vN[:N]
-    revision.
+    an inference-region prefix and a vendor prefix (see _MODEL_PREFIX), then a
+    trailing -YYYYMMDD date and a -vN[:N] revision.
     """
-    after_dot = raw.rsplit(".", 1)[-1]
-    return _MODEL_DATE_REV.sub("", after_dot)
+    return _MODEL_DATE_REV.sub("", _MODEL_PREFIX.sub("", raw))
 
 
 def _get_json(url: str):
@@ -459,13 +465,13 @@ SELECT
     -- reach claude-haiku-4-5 and claude-opus-4-1, or the price lookup misses
     -- and the call silently costs zero.
     --
-    -- regexp_extract drops any inference-profile prefix (everything up to the
-    -- last dot); regexp_replace drops a trailing -YYYYMMDD date and a -vN[:N]
-    -- revision.
+    -- The inner regexp_replace drops the region and vendor prefixes (see
+    -- _MODEL_PREFIX); the outer one drops a trailing -YYYYMMDD date and a
+    -- -vN[:N] revision.
     regexp_replace(
-        regexp_extract(
+        regexp_replace(
             COALESCE(NULLIF(response_model, ''), request_model),
-            '([^.]+)$', 1),
+            '^([a-z]+\\.){0,2}', ''),
         '(-\\d{8})?(-v\\d+(:\\d+)?)?$', ''
     )                                                  AS model,
     -- The exact strings the call carried, kept for audit evidence.
