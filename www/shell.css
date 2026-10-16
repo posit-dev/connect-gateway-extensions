@@ -192,8 +192,23 @@ body.drawer-open .filter-drawer {
 }
 
 @media (max-width: 900px) {
-  .nav-rail { display: none; }
-  .topbar-meta { display: none; }
+  /* Keep every page reachable: main_tabs has no visible tabs of its own. */
+  .shell-body { display: block; }
+  #nav_rail {
+    position: sticky; top: var(--topbar-h); z-index: 1020;
+    width: 100%;
+  }
+  .nav-rail {
+    position: static; display: flex; align-items: center; gap: 4px;
+    width: 100%; height: auto; padding: 8px 12px;
+    overflow-x: auto; white-space: nowrap;
+    border-right: 0; border-bottom: 1px solid var(--hairline);
+  }
+  .nav-section { display: none; }
+  .nav-rail .nav-item { flex: 0 0 auto; width: auto; margin: 0; }
+  .topbar-brand { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .topbar .shiny-html-output#topbar_status, .topbar-meta { display: none; }
+  .topbar-load { margin-left: auto; flex: none; }
 }
 
 /* Plotly's hover toolbar (camera, zoom, pan, lasso, reset) is hidden: these are

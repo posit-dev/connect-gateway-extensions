@@ -297,47 +297,6 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
 }
 .export-btn:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 
-/* ---- filter chips above a table ------------------------------------------ */
-.chip-bar {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-/* The button is only the popover's trigger; the pill inside it carries the look,
-   which keeps the active state on an element the server re-renders. */
-.chip-btn { background: none; border: 0; padding: 0; }
-.chip {
-  align-items: center;
-  background: var(--surface-1);
-  border: 1px solid var(--hairline-strong);
-  border-radius: 999px;
-  color: var(--text-secondary);
-  display: inline-flex;
-  font-size: 0.78rem;
-  font-weight: 500;
-  gap: 6px;
-  padding: 4px 12px;
-}
-.chip::after { content: "\25be"; font-size: 0.7rem; line-height: 1; }
-.chip-btn:hover .chip,
-.chip-btn:focus-visible .chip { border-color: var(--accent); color: var(--accent); }
-.chip-on {
-  background: var(--accent-soft);
-  border-color: var(--accent-border);
-  color: var(--accent);
-  font-weight: 600;
-}
-.chip-menu { min-width: 190px; }
-.chip-menu .shiny-input-container { margin-bottom: 0; width: auto; }
-.chip-menu-note {
-  color: var(--text-muted); font-size: 0.74rem; line-height: 1.4;
-  margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--hairline);
-}
-.chip-clear { font-size: 0.78rem; color: var(--accent); }
-.chip-bar-note {
-  color: var(--text-muted); font-size: 0.76rem; line-height: 1.45;
-  margin: -4px 0 12px;
-}
-
 /* ---- data grids ---------------------------------------------------------- */
 shiny-data-frame { font-variant-numeric: tabular-nums; font-size: 0.9rem; }
 /* headers sit one step off the card surface so they read as a distinct band
@@ -454,21 +413,10 @@ body .card-body shiny-data-frame .shiny-data-grid {
   padding: 8px 2px 2px;
 }
 
-/* Conversations: the table's filters, and the one-line readings under a chart. */
-.conv-filters { display: flex; gap: 12px; flex-wrap: wrap; }
+/* Conversations: the one-line readings under a chart. */
 .card-note {
   color: var(--text-muted);
   font-size: 0.85rem;
   padding: 6px 14px 8px;
 }
 .conv-one { margin-bottom: 12px; }
-
-.unpriced-note {
-  border-left: 3px solid #e0a72c;
-  background: color-mix(in srgb, #e0a72c 10%, transparent);
-  color: var(--text);
-  font-size: 0.85rem;
-  padding: 8px 12px;
-  margin-bottom: 12px;
-  border-radius: 4px;
-}

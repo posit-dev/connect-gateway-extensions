@@ -19,7 +19,6 @@ from __future__ import annotations
 import math
 from types import SimpleNamespace
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from shiny import reactive, render, req, ui
@@ -378,39 +377,6 @@ def fig_relation(rel: dict, mode: str) -> go.Figure:
     fig.update_xaxes(range=[0, top.est_spend_usd.max() * 1.3], title_text="est. USD")
     return apply(fig, mode, height=max(200, 26 * len(top) + 70),
                  showlegend=any(v for v, _ in groups), hover=True)
-
-
-def fig_conv_scatter(df, mode) -> go.Figure:
-    df = df[df.est > 0]
-    if df.empty:
-        return empty_fig(mode, "No conversations in this view")
-    t = theme.TOKENS[mode]
-    fig = go.Figure()
-    for flag in (False, True):
-        d = df[df.high == flag]
-        if d.empty:
-            continue
-        # A log axis has no zero, and a one-turn conversation lasts 0 minutes,
-        # so anything under half a minute is drawn at half a minute. The hover
-        # keeps the real duration.
-        fig.add_scatter(
-            x=d.minutes.clip(lower=0.5), y=d.est, mode="markers",
-            name=f"higher cost (above p{HIGH_PCT:g})" if flag else "conversation",
-            marker={
-                "size": 11 if flag else 7,
-                "color": theme.STATUS["warning"] if flag else t["series"][0],
-                "opacity": 0.9 if flag else 0.4,
-                "line": {"width": 1, "color": t["surface"]},
-            },
-            customdata=np.stack([d.conversation.map(short), d.minutes.round(0), d.model,
-                                 d.turns], axis=-1),
-            hovertemplate="<b>$%{y:,.2f}</b> \u00b7 %{customdata[1]} min \u00b7 "
-                          "%{customdata[3]} turns<br>%{customdata[0]} \u00b7 "
-                          "%{customdata[2]}<extra></extra>",
-        )
-    fig.update_xaxes(type="log", title_text="minutes (log)", dtick=1)
-    fig.update_yaxes(type="log", tickprefix="$", title_text="est. USD (log)")
-    return apply(fig, mode, height=320, showlegend=True, hover=True)
 
 
 # ---- UI ---------------------------------------------------------------------------

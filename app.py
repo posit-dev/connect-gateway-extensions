@@ -540,19 +540,6 @@ PRESETS = {
 
 DEFAULT_PRESET = "30d"
 
-MEASURES = {"spend": "Dollars", "tokens": "Tokens"}
-
-# Where the call ran. Connect content always stamps a content guid; a Workbench
-# session and a direct API caller never do. Both is the union, and it groups by
-# user so one person's Connect and Workbench usage add up.
-SOURCES = {"both": "Both", "connect": "Connect", "workbench": "Workbench"}
-
-# Only Connect can group by content: a Workbench call has no content item, and a
-# Both view has to use the axis the two sources share.
-GROUP_BY = {"username": "User", "content_guid": "Content"}
-
-GROUP_NOUN = {"username": "user", "content_guid": "content"}
-
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
@@ -687,12 +674,6 @@ def plural(n, word: str) -> str:
     return f"{word}s" if n != 1 else word
 
 
-def price_note(info: dict) -> str:
-    """How many models the Connect price catalog prices, for the sidebar."""
-    n = info.get("priced_models") or 0
-    return f"prices: {n} {plural(n, 'model')} from Connect catalog"
-
-
 # How many leading characters of a content guid a chart axis shows.
 GUID_LABEL_CHARS = 8
 
@@ -721,21 +702,6 @@ def chart_labels(dim: str, values) -> list[str]:
         f"{lab} ({v[:6]})" if counts[lab] > 1 and n else lab
         for lab, n, v in zip(labels, named, full)
     ]
-
-
-def name_content(df: pd.DataFrame, dim: str, col: str = "principal") -> pd.DataFrame:
-    """Show a content item by title, keeping its guid in a column of its own.
-
-    Only the content axis changes. A title is not unique and a deleted item has
-    none, so the guid stays beside it (and in any CSV export) as the identifier.
-    """
-    if dim != "content_guid" or df.empty:
-        return df
-    df = df.copy()
-    guids = df[col].astype(str)
-    df.insert(df.columns.get_loc(col) + 1, "guid", guids)
-    df[col] = [usage.content_name(g) or g for g in guids]
-    return df
 
 
 WWW = Path(__file__).parent.resolve() / "www"
@@ -829,45 +795,6 @@ def filter_label(text: str, key: str) -> ui.Tag:
             placement="right",
         ),
         class_="filter-label",
-    )
-
-
-def filter_chip(label_id: str, *body) -> ui.Tag:
-    """A filter chip: a pill above a table that opens the values it filters on.
-
-    The pill's text is an output rather than fixed markup, so the server can name
-    the current selection and mark the chip as active. The menu inside is static
-    on purpose: re-rendering it would tear down the checkboxes the reader is in
-    the middle of clicking, and close the popover under them.
-    """
-    return ui.popover(
-        ui.tags.button(
-            ui.output_ui(label_id, inline=True), class_="chip-btn", type="button"
-        ),
-        *body,
-        placement="bottom",
-    )
-
-
-def chip_label(field: str, picked: list[str], labels: dict | None = None) -> ui.Tag:
-    """One chip's text: the field on its own, or the field and what it is set to.
-
-    One or two values are named outright, since the name is the useful part. Past
-    that the chip would outgrow the bar, so it says how many instead.
-    """
-    names = [str((labels or {}).get(v, v)) for v in picked]
-    if not names:
-        return ui.span(field, class_="chip")
-    said = ", ".join(names) if len(names) <= 2 else f"{len(names)} selected"
-    return ui.span(f"{field}: {said}", class_="chip chip-on")
-
-
-def chip_menu(*body, note: str | None = None) -> ui.Tag:
-    """The body of a chip's popover: the control, and optionally why it behaves so."""
-    return ui.div(
-        *body,
-        ui.div(note, class_="chip-menu-note") if note else None,
-        class_="chip-menu",
     )
 
 
@@ -1905,40 +1832,6 @@ def server(input, output, session):
             conds.append(f"{meta_expr(k)} IN ({','.join(sql_str(v) for v in vals)})")
         return " AND ".join(conds) + extra
 
-    # ---- shared chart shapes ------------------------------------------------
-    def daily_lines(f, m, dim: str, order, color_kind: str | None):
-        """One line per category, measured per day."""
-        # A null key means the record has no value on this axis (no user, or no
-        # content). It is not a series — plotting it yields a "nan" line.
-        df = usage.q(f"""SELECT day, {dim} AS k, SUM({m["expr"]}) v FROM gateway_events
-                         WHERE {where(f)} AND {dim} IS NOT NULL
-                         GROUP BY 1,2 ORDER BY 1""")
-        if df.empty or not df.v.sum():
-            return empty_fig(f["mode"], f"No {m['noun']} recorded in this view")
-        fig = go.Figure()
-        label = dict(zip(order, chart_labels(dim, order)))
-        for i, k in enumerate(order):
-            d = df[df.k == k]
-            if d.empty:
-                continue
-            c = (
-                color(color_kind, k, f["mode"])
-                if color_kind
-                else theme.TOKENS[f["mode"]]["series"][i % 8]
-            )
-            fig.add_scatter(
-                x=d.day,
-                y=d.v,
-                name=label[k],
-                mode="lines+markers",
-                line={"width": 2, "color": c},
-                marker={"size": 5, "color": c},
-                hovertemplate=(
-                    f"<b>{m['prefix']}%{{y:{m['tick']}}}</b> {k}<extra></extra>"
-                ),
-            )
-        return apply(fig, f["mode"], time_axis=True, showlegend=True, y_title=m["axis"])
-
     def total_bars(
         f, m, dim: str, color_kind: str | None, limit: int = 15, height: int = 320
     ):
@@ -2906,55 +2799,6 @@ def server(input, output, session):
             _pretty(formatted(df)),
             height=None if len(df) <= 12 else "420px",
         )
-
-
-    def _top_of(f, m, column: str, limit: int = 6):
-        """The busiest values of one identity column, for a readable line chart."""
-        return usage.q(f"""SELECT {column} AS k FROM gateway_events
-                           WHERE {where(f)} AND {column} IS NOT NULL
-                           GROUP BY 1 ORDER BY SUM({m["expr"]}) DESC
-                           LIMIT {limit}""")["k"].tolist()
-
-    def no_principal(f) -> str:
-        """Why the grouping axis is empty, in the terms of the chosen origin."""
-        if f["dim"] == "content_guid":
-            return "No request in range came from content"
-        if f["source"] == "connect":
-            return (
-                "No Connect request in range names a user, a viewer or an "
-                "owner. Group by content instead."
-            )
-        return "No request in range names a user"
-
-    # ---- principals ---------------------------------------------------------
-    @render.ui
-    def principal_kpis():
-        f, m = flt(), measure_of(flt())
-        r = usage.q(f"""SELECT COALESCE(SUM({m["expr"]}),0) v, COUNT(*) req,
-                            COUNT(DISTINCT {f["dim"]}) n
-                     FROM gateway_events WHERE {where(f)}""").iloc[0]
-        noun = GROUP_NOUN[f["dim"]]
-        return ui.layout_columns(
-            theme.stat_tile(
-                m["noun"].capitalize(), m["card_fmt"](r.v), "all origins"
-            ),
-            theme.stat_tile("Requests", card_num(r.req), "in range"),
-            theme.stat_tile(
-                plural(r.n, noun.capitalize()),
-                card_num(r.n),
-                f"charged {plural(r.n, noun)} in range",
-            ),
-            col_widths=[4, 4, 4],
-            class_="kpi-row",
-        )
-
-    def named(f, extra: str = "") -> str:
-        """Rows that name a principal on the current axis.
-
-        A request with no user is not a user called "nan": it is left out of the
-        rankings, and the tables say how much it accounts for.
-        """
-        return where(f, f" AND {f['dim']} IS NOT NULL{extra}")
 
     # ---- cost drivers -------------------------------------------------------
     def compact_at() -> int:
