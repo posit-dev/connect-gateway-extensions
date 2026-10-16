@@ -34,11 +34,10 @@ probe. Conversation content (`system_instructions`, `input_messages`,
 `output_messages`) is never exported, and this dashboard never asks for it.
 
 The export is read into the local `gateway_events` table, and every dashboard
-query runs against local data. The first load reads the whole window; "Refresh
-data" then asks only for what Connect ingested since, keyed on `ingest_time`
-(see load()). The table is also kept as a Parquet snapshot in the app's
-working directory, so a restarted process starts from it instead of from a
-full export.
+query runs against local data. Refreshes request the entire start-time window
+so late-ingested older calls cannot be lost; DuckDB then merges only records
+since the last watermark. The table is also saved as a Parquet snapshot in the
+app's working directory so a restarted process can reuse its existing rows.
 """
 
 from __future__ import annotations
@@ -156,14 +155,44 @@ def _get_json(url: str):
         return None
 
 
+def _list_pages(url: str, page_size: int = 100) -> list | None:
+    """Read a whole Connect list, or fail without returning a partial list.
+
+    Some endpoints return bare arrays; others include results and total. Use
+    total when supplied, since the server may cap the requested page size.
+    """
+    items: list = []
+    previous: list | None = None
+    page = 1
+    while True:
+        body = _get_json(f"{url}?page_size={page_size}&page_number={page}")
+        rows = _results(body)
+        if rows is None or (previous is not None and rows == previous and rows):
+            return None  # failed page, or a server ignoring page_number
+        if isinstance(body, dict) and body.get("current_page") not in (None, page):
+            return None
+        items.extend(rows)
+        total = body.get("total") if isinstance(body, dict) else None
+        if isinstance(total, int) and not isinstance(total, bool):
+            if len(items) >= total:
+                return items
+            if not rows:
+                return None
+        elif len(rows) < page_size or (page == 1 and len(rows) > page_size):
+            # More than requested means this endpoint returned an unpaged list.
+            return items
+        previous = rows
+        page += 1
+
+
 def _fetch_content_names() -> dict[str, str] | None:
     """guid -> title (else name) for every content item, or None on failure.
 
     An unexpected shape also returns None, so one bad refresh keeps the last
     good names instead of dropping every label back to a guid.
     """
-    items = _get_json(f"{_API_BASE}/content")
-    if not isinstance(items, list):
+    items = _list_pages(f"{_API_BASE}/content")
+    if items is None:
         return None
     names: dict[str, str] = {}
     for item in items:
@@ -187,23 +216,20 @@ def _results(body) -> list | None:
 def _fetch_groups() -> list[tuple[str, str, str]] | None:
     """Every (user_guid, group_guid, group_name) membership, or None on failure.
 
-    One request for the group list (paged), then one per group for its members,
-    so this is slow on a server with thousands of groups. It runs beside the
-    export download, off the caller's path.
+    The group list and each group's members are paged. A partial response is
+    unusable for group totals, so leave the previous membership table intact.
     """
-    groups, page = [], 1
-    while True:
-        rows = _results(_get_json(f"{_API_BASE}/groups?page_size=500&page_number={page}"))
-        if rows is None:
-            return None  # a partial list would misstate every group
-        groups += [g for g in rows if isinstance(g, dict) and g.get("guid")]
-        if len(rows) < 500:
-            break
-        page += 1
+    groups = _list_pages(f"{_API_BASE}/groups")
+    if groups is None:
+        return None
     out = []
     for g in groups:
-        members = _results(_get_json(f"{_API_BASE}/groups/{g['guid']}/members"))
-        for m in members or []:
+        if not isinstance(g, dict) or not g.get("guid"):
+            continue
+        members = _list_pages(f"{_API_BASE}/groups/{g['guid']}/members")
+        if members is None:
+            return None
+        for m in members:
             if isinstance(m, dict) and m.get("guid"):
                 out.append((m["guid"], g["guid"], g.get("name") or g["guid"]))
     return out
@@ -669,19 +695,15 @@ def _merge_export(path: Path, window_from: str, window_to: str, cutoff: str) -> 
 
 # ---- incremental refresh and the shared snapshot ----------------------------
 #
-# A full export is what costs: Connect converts every JSONL file in the window,
-# and that scales with the window (17-30 s for 1.6M rows). A refresh therefore
-# asks only for what was ingested since the last load. ingest_time is the key:
-# the export filters on it (as_of), the log is append-only in it, and it is the
-# time Connect wrote the record, so nothing can appear below a watermark that
-# has already been read -- except a record that reached disk late, which is
-# what REFETCH_MARGIN re-reads.
+# Every export covers the whole start-time window, including requests that
+# started long before they were ingested. Connect converts those partitions on
+# each refresh; only the local DuckDB merge is incremental. The as_of watermark
+# and REFETCH_MARGIN let us replace rows that arrived late on disk without
+# duplicating them.
 #
-# The table is also saved, as Parquet, in the app's working directory. Connect
-# keeps that directory across restarts and idle shutdowns and shares it with
-# every process of this app; a redeploy wipes it, which costs one full load. A
-# process that starts with a snapshot to hand loads it from local disk and
-# fetches only the gap since it was written.
+# The table is also saved as Parquet across restarts. A usable snapshot avoids
+# reshaping the entire export locally, though Connect still converts and sends
+# the whole window when the process catches up.
 
 # How far below the last watermark a refresh starts. Connect stamps ingest_time
 # before the record is queued for its writer, so one can land after a
@@ -731,6 +753,7 @@ def _settings() -> str:
     return json.dumps(
         [
             hashlib.sha256(_SHAPE.encode()).hexdigest()[:16],
+            "full-window-delta-v2",  # invalidate snapshots from partition-limited merges
             CONNECT_SERVER,
             LOOKBACK_DAYS,
             os.environ.get("GATEWAY_FROM"),
@@ -855,11 +878,10 @@ def load() -> dict:
 
     Called at import and again for every refresh. The first load in a process
     starts from the shared snapshot when there is a usable one; after that,
-    each load fetches only what was ingested since the last, with a full
-    reload every FULL_RELOAD_EVERY. A failure leaves the data already loaded
-    in place, so a refresh that cannot reach the endpoint is not destructive.
-    The query lock is held only while DuckDB reads the downloaded file, not
-    during the download, so queries keep running meanwhile.
+    each load merges recently ingested rows from a full-window export, with
+    a complete local rebuild every FULL_RELOAD_EVERY. A failure leaves the data
+    already loaded in place. The query lock is held only while DuckDB reads
+    the downloaded file, not during the download.
     """
     with _load_lock:
         return _load()
@@ -890,10 +912,12 @@ def _load() -> dict:
         # and from > to is a request Connect refuses.
         as_of = max(as_of, _state["as_of"].strftime(_RFC3339))
         cutoff = (_state["as_of"] - REFETCH_MARGIN).strftime(_RFC3339)
-        # The request window only picks the partitions to convert; the trailing
-        # window itself is applied on start_time, as for a full load.
+        # Connect selects start-time partitions, not ingest-time partitions.
+        # Always export the full start-time window: otherwise deleting rows
+        # with ingest_time >= cutoff would erase older-started calls absent
+        # from the delta, and new late-ingested ones would never appear.
         new_rows = _ingest(
-            _export_url(cutoff, as_of, as_of),
+            _export_url(window_from, window_to, as_of),
             lambda p: _merge_export(p, window_from, window_to, cutoff),
         )
         full_at = _state["full_at"]

@@ -10,13 +10,13 @@ every chart then queries local data. The export holds metadata only. It never
 contains the text of a prompt or a reply.
 
 Connect builds the export on request, and the time that takes grows with the
-window: 17-30 s for 1.6M records. So the app reads the whole window only once.
-"Refresh data" asks only for the records Connect has written since the last
-load, which takes a few seconds, and the app re-reads the whole window once
-every 24 hours. The table is also saved as a Parquet snapshot in
-`.gateway-cache/`, in the app's working directory. Connect keeps that
-directory until the next deploy and shares it with every process of the app,
-so a restarted process loads the snapshot and fetches only what is new.
+window: 17-30 s for 1.6M records. Each refresh exports the whole start-time
+window, then merges only recently ingested records locally. The full export is
+necessary because a call can be ingested long after it started; requesting only
+recent start-time partitions would omit it. The app rebuilds its local table
+from scratch every 24 hours. A Parquet snapshot in `.gateway-cache/` lets a
+restarted process reuse its existing rows, although catching up still requires
+a full-window export from Connect.
 
 ## Configuration
 
