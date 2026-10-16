@@ -41,22 +41,23 @@ TOKENS = {
         ],
     },
     "dark": {
-        "surface": "#1c2128",
-        "page": "#14181d",
-        "ink": "#eef1f4",
-        "ink2": "#b3bcc6",
-        "muted": "#8a949f",
-        "grid": "#2e353d",
-        "axis": "#3d454e",
+        "surface": "#131a2b",
+        "page": "#0a0e1a",
+        "ink": "#e8ecf4",
+        "ink2": "#9aa6bd",
+        "muted": "#6b7896",
+        "grid": "#1f2a44",
+        "axis": "#2a3656",
+        # Saturated on purpose: thin bars on a near-black card need the punch.
         "series": [
-            "#6aa8dd",
-            "#8bbf6c",
-            "#e0b552",
-            "#e8945c",
-            "#d9615b",
-            "#4fa39c",
-            "#9083c9",
-            "#c47ba0",
+            "#3b82f6",
+            "#a855f7",
+            "#10b981",
+            "#f97316",
+            "#ec4899",
+            "#22c1dc",
+            "#eab308",
+            "#ef4444",
         ],
         "seq": [
             "#1c4d78",
@@ -77,10 +78,7 @@ STATUS = {
     "critical": "#c0413b",
 }
 
-FONT = (
-    '"Open Sans", "Source Sans Pro", system-ui, -apple-system, '
-    '"Segoe UI", Roboto, sans-serif'
-)
+FONT = '"Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
 
 # fixed slot assignments -- color follows the entity, never its rank
 MODEL_ORDER = [
@@ -90,19 +88,41 @@ MODEL_ORDER = [
     "gpt-5-mini",
     "claude-haiku-4-5",
 ]
-PROVIDER_ORDER = ["anthropic", "openai", "aws.bedrock", "azure.openai", "google.vertex"]
+PROVIDER_ORDER = [
+    "anthropic",
+    "openai",
+    "bedrock",  # what the export writes for AWS Bedrock
+    "aws.bedrock",
+    "azure.openai",
+    "google.vertex",
+]
 
-_SLOTS = {"model": MODEL_ORDER, "provider": PROVIDER_ORDER}
+# Unlisted names take the next free slot the first time they are seen, so two of
+# them never share a colour (a hash would collide) and each keeps its colour for
+# the life of the process.
+_UNLISTED: dict[tuple[str, str], int] = {}
+
+ORIGIN_ORDER = ["connect", "workbench", "local"]
+TOOL_ORDER = ["Posit Assistant", "Claude Code", "GitHub Copilot", "Codex CLI", "Pi",
+              "R (ellmer)", "API SDKs", "Other"]
+
+_SLOTS = {"model": MODEL_ORDER, "provider": PROVIDER_ORDER, "origin": ORIGIN_ORDER, "tool": TOOL_ORDER}
 
 
 def color(kind: str, name: str, mode: str) -> str:
     order = _SLOTS[kind]
     series = TOKENS[mode]["series"]
-    return (
-        series[order.index(name) % len(series)]
-        if name in order
-        else TOKENS[mode]["muted"]
-    )
+    if name in order:
+        return series[order.index(name) % len(series)]
+    # A name with no reserved slot still gets a colour of its own, kept
+    # for the life of the process, so it is the same on every render and chart. Gray made
+    # every unlisted model look like "other".
+    # The count is per kind: one shared counter let a model's slot push a provider
+    # round onto a colour another provider already held.
+    if (kind, name) not in _UNLISTED:
+        _UNLISTED[(kind, name)] = sum(1 for k, _ in _UNLISTED if k == kind)
+    slot = _UNLISTED[(kind, name)]
+    return series[(len(order) + slot) % len(series)]
 
 
 def seq_colorscale(mode: str):
@@ -119,14 +139,21 @@ def apply(
     time_axis: bool = False,
     showlegend: bool | None = None,
     y_title: str | None = None,
+    hover: bool = False,
 ) -> go.Figure:
+    """Chart chrome. `hover` turns tooltips on.
+
+    Off by default: bars and donuts carry their values as labels, so a tooltip
+    only repeats them. Turn it on where it is the only way to read a value (a
+    dense line, a stack, a heatmap, an unlabelled scatter).
+    """
     t = TOKENS[mode]
     fig.update_layout(
         paper_bgcolor=t["surface"],
         plot_bgcolor=t["surface"],
-        font={"family": FONT, "size": 12, "color": t["ink2"]},
+        font={"family": FONT, "size": 14, "color": t["ink2"]},
         height=height,
-        margin={"l": 8, "r": 8, "t": 34 if showlegend else 12, "b": 8},
+        margin={"l": 16, "r": 20, "t": 34 if showlegend else 12, "b": 8},
         barcornerradius=3,
         colorway=t["series"],
         legend={
@@ -134,15 +161,16 @@ def apply(
             "yanchor": "bottom",
             "y": 1.02,
             "x": 0,
-            "font": {"size": 11},
+            "font": {"size": 15, "color": t["ink"]},
             "bgcolor": "rgba(0,0,0,0)",
         },
         hoverlabel={
-            "bgcolor": t["surface"],
-            "bordercolor": t["grid"],
-            "font": {"family": FONT, "size": 12, "color": t["ink"]},
+            # Black with white text, matching the name label on bars and donuts.
+            "bgcolor": "#000000",
+            "bordercolor": "rgba(255,255,255,0.35)",
+            "font": {"family": FONT, "size": 14, "color": "#ffffff"},
         },
-        hovermode="x unified" if time_axis else "closest",
+        hovermode=("x unified" if time_axis else "closest") if hover else False,
     )
     grid = {
         "gridcolor": t["grid"],
@@ -150,11 +178,14 @@ def apply(
         "linecolor": t["axis"],
         "linewidth": 1,
         "zeroline": False,
-        "tickfont": {"color": t["muted"], "size": 11},
-        "title_font": {"color": t["muted"], "size": 11},
+        "tickfont": {"color": t["ink"], "size": 15},
+        "title_font": {"color": t["ink2"], "size": 14},
     }
     fig.update_xaxes(**grid, showgrid=False)
     fig.update_yaxes(**grid, title_text=y_title)
+    # Air between the labels and the axis line: invisible outward ticks push the
+    # tick labels away from the plot.
+    fig.update_yaxes(ticks="outside", ticklen=10, tickcolor="rgba(0,0,0,0)")
     if time_axis:
         fig.update_xaxes(
             showspikes=True,
@@ -221,6 +252,10 @@ def card_num(v: float) -> str:
     return "–" if v is None else f"{v:,.0f}"
 
 
+# Longer than this, a tile's value is a name rather than a figure.
+TILE_TEXT_MAX = 10
+
+
 def stat_tile(
     label: str,
     value: str,
@@ -239,15 +274,20 @@ def stat_tile(
         if status
         else None
     )
+    # A name (a model, a content title) is longer than any figure and would wrap
+    # at its hyphens into a tall, ragged tile. It gets a smaller size on one
+    # line, cut with an ellipsis if it still does not fit, and the full name on
+    # hover. Figures keep the large size.
+    long_text = isinstance(value, str) and len(value) > TILE_TEXT_MAX
     return ui.div(
         ui.div(dot, label, help, class_="tile-label"),
-        ui.div(value, class_="tile-value"),
+        ui.div(
+            value,
+            class_="tile-value tile-value-text" if long_text else "tile-value",
+            title=value if long_text else None,
+        ),
         ui.div(note or "", class_="tile-note"),
         class_="stat-tile",
     )
 
 
-def verdict(answer: str, ok: bool | None) -> ui.Tag:
-    """Yes/no verdict chip for the spend-threshold cards. ok=None renders neutral."""
-    cls = "verdict-neutral" if ok is None else ("verdict-ok" if ok else "verdict-flag")
-    return ui.span(answer, class_=f"verdict {cls}")

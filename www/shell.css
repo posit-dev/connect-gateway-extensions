@@ -1,0 +1,261 @@
+/* App shell: top bar, nav rail, global filter strip, filter drawer.
+   Page content (cards, tiles, grids) is styled in styles.css. */
+
+:root { --topbar-h: 48px; --rail-w: 208px; }
+
+.app-shell { min-height: 100vh; background: var(--page); }
+
+/* ---- top bar -------------------------------------------------------------- */
+.topbar {
+  position: sticky; top: 0; z-index: 1030;
+  height: var(--topbar-h);
+  display: flex; align-items: center; gap: 16px;
+  padding: 0 18px;
+  background: var(--shell-bg);
+  border-bottom: 1px solid var(--hairline);
+}
+.topbar-brand { font-weight: 600; font-size: 0.95rem; color: var(--text-primary); white-space: nowrap; }
+.topbar .brand { display: inline-flex; align-items: center; gap: 0.65rem; }
+.topbar .brand-logo svg { display: block; height: 18px; width: auto; }
+[data-bs-theme="dark"] .topbar .brand-logo .posit-logo-2,
+[data-bs-theme="dark"] .topbar .brand-logo .posit-logo-4 { fill: var(--text-primary); }
+.topbar .shiny-html-output#topbar_status { margin-left: auto; }
+.topbar-load { display: flex; align-items: center; gap: 12px; }
+.topbar-right { display: flex; align-items: center; gap: 10px; }
+.topbar-meta {
+  color: var(--text-secondary); font-family: var(--font-mono); font-size: 0.78rem;
+  white-space: nowrap;
+}
+.pill {
+  border-radius: 999px; padding: 2px 10px; white-space: nowrap;
+  font-family: var(--font-mono); font-size: 0.7rem; font-weight: 600;
+  border: 1px solid transparent;
+}
+.pill-blue  { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-border); }
+.pill-purple { background: color-mix(in srgb, #a855f7 14%, transparent); color: #c084fc; border-color: color-mix(in srgb, #a855f7 40%, transparent); }
+.pill-amber { background: color-mix(in srgb, #f59e0b 14%, transparent); color: #fbbf24; border-color: color-mix(in srgb, #f59e0b 40%, transparent); }
+.pill-warn { background: color-mix(in srgb, #e0a72c 22%, transparent); color: #e0a72c; border-color: #e0a72c; font-weight: 600; cursor: help; }
+.pill-green { background: var(--good-soft); color: var(--good-text); border-color: color-mix(in srgb, var(--good-text) 35%, transparent); }
+.topbar .bslib-input-dark-mode { flex: none; }
+
+/* ---- body: rail + content ------------------------------------------------- */
+.shell-body { display: flex; align-items: flex-start; }
+.nav-rail {
+  position: sticky; top: var(--topbar-h);
+  flex: 0 0 var(--rail-w); width: var(--rail-w);
+  height: calc(100vh - var(--topbar-h));
+  padding: 14px 10px; overflow-y: auto;
+  background: var(--shell-bg);
+  border-right: 1px solid var(--hairline);
+}
+.nav-section {
+  color: var(--text-muted); font-family: var(--font-mono);
+  font-size: 0.64rem; letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 14px 10px 6px;
+}
+.nav-section:first-child { padding-top: 2px; }
+.nav-rail .nav-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 10px; margin-bottom: 2px;
+  background: transparent; border: 1px solid transparent; border-radius: var(--radius);
+  color: var(--text-secondary); font-size: 0.85rem; text-align: left; cursor: pointer;
+}
+.nav-rail .nav-item:hover { background: var(--surface-2); color: var(--text-primary); }
+.nav-rail .nav-item.active {
+  background: var(--accent-soft); border-color: var(--accent);
+  color: var(--accent); font-weight: 500;
+}
+.nav-ico { width: 14px; text-align: center; font-size: 0.8rem; opacity: 0.85; }
+
+/* Sub-tabs inside a page (Principals). Scoped to .pf-tabs: Bootstrap's own
+   `.nav-item` on the tab <li> must not pick up the rail's button styling. */
+.pf-tabs .nav {
+  display: flex; flex-direction: row; flex-wrap: nowrap; gap: 4px;
+  margin: 18px 0 16px; padding: 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.pf-tabs .nav .nav-item { width: auto; margin: 0 0 -1px; }
+.pf-tabs .nav .nav-link {
+  padding: 10px 18px; font-size: 0.9rem; font-weight: 500;
+  color: var(--text-secondary); background: transparent;
+  border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+  text-decoration: none;
+}
+.pf-tabs .nav .nav-link:hover { color: var(--text-primary); }
+.pf-tabs .nav .nav-link.active {
+  color: var(--accent); border-bottom-color: var(--accent);
+}
+
+.content { flex: 1 1 auto; min-width: 0; padding: 0 22px 40px; }
+
+/* ---- global filter strip -------------------------------------------------- */
+.filterstrip {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  padding: 16px 0 6px;
+}
+.filterstrip .shiny-input-container { margin: 0; width: auto; }
+.seg .shiny-input-container { margin: 0; width: auto; }
+.filterstrip .control-label:empty { display: none; }
+.strip-label {
+  color: var(--text-muted); font-family: var(--font-mono);
+  font-size: 0.64rem; letter-spacing: 0.1em; text-transform: uppercase;
+}
+.strip-sep { width: 1px; height: 22px; background: var(--hairline-strong); margin: 0 4px; }
+
+/* Radio groups drawn as segmented chips. The inputs stay in the DOM (they are
+   what Shiny reads); the label is what a reader sees. */
+:is(.filterstrip, .seg) .shiny-options-group { display: flex; gap: 4px; }
+:is(.filterstrip, .seg) .radio-inline { margin: 0 !important; padding: 0 !important; }
+:is(.filterstrip, .seg) .radio-inline input { position: absolute; opacity: 0; pointer-events: none; }
+:is(.filterstrip, .seg) .radio-inline span {
+  display: inline-block; padding: 3px 10px; cursor: pointer;
+  background: var(--surface-1); border: 1px solid var(--hairline-strong);
+  border-radius: 4px; color: var(--text-secondary);
+  font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.02em;
+}
+:is(.filterstrip, .seg) .radio-inline:hover span { border-color: var(--accent); color: var(--text-primary); }
+:is(.filterstrip, .seg) .radio-inline:has(input:checked) span {
+  background: var(--accent-soft); border-color: var(--accent); color: var(--accent);
+}
+/* "Custom" is a state, not a button. */
+:is(.filterstrip, .seg) .radio-inline:has(input[value="custom"]) { display: none; }
+:is(.filterstrip, .seg) .radio-inline:has(input[value="custom"]:checked) { display: inline-block; }
+
+.filterstrip .input-daterange { width: auto; }
+.filterstrip .input-daterange .form-control {
+  width: 112px; padding: 3px 8px; height: auto;
+  font-family: var(--font-mono); font-size: 0.72rem; text-align: center;
+}
+.filterstrip .input-daterange .input-group-addon,
+.filterstrip .input-daterange .input-group-text {
+  background: transparent; border: 0; color: var(--text-muted);
+  font-family: var(--font-mono); font-size: 0.64rem; text-transform: uppercase;
+  padding: 0 6px; display: flex; align-items: center;
+}
+
+.strip-btn {
+  position: relative; padding: 3px 12px;
+  background: var(--surface-1); border: 1px solid var(--accent-border);
+  border-radius: 4px; color: var(--accent);
+  font-family: var(--font-mono); font-size: 0.72rem; cursor: pointer;
+}
+.strip-btn:hover { background: var(--accent-soft); border-color: var(--accent); }
+
+/* ---- page header ---------------------------------------------------------- */
+.page-header { margin: 14px 2px 18px; }
+.page-title { font-size: 1.45rem; font-weight: 700; margin: 0 0 2px; }
+.page-sub { color: var(--text-muted); font-size: 0.8rem; }
+/* a page-level switch under the title (e.g. Attribution: All / Content / Users) */
+.page-switch { display: flex; align-items: center; gap: 10px; margin: -6px 2px 16px; flex-wrap: wrap; }
+.page-switch-note { color: var(--text-muted); font-size: 0.74rem; margin-left: 8px; }
+/* the question rows keep their wording but sit as quiet section labels */
+.row-question {
+  font-family: var(--font-mono); font-size: 0.72rem; font-weight: 500;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-secondary);
+  margin: 22px 2px 10px;
+}
+.shell-body .card { margin-bottom: 1rem; }
+
+/* ---- filter drawer -------------------------------------------------------- */
+.filter-drawer {
+  position: fixed; top: var(--topbar-h); right: 0; bottom: 0; z-index: 1040;
+  width: 320px; max-width: 92vw;
+  display: flex; flex-direction: column;
+  background: var(--shell-bg); border-left: 1px solid var(--hairline-strong);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
+  transform: translateX(105%); visibility: hidden;
+  transition: transform 0.18s ease, visibility 0s linear 0.18s;
+}
+body.drawer-open .filter-drawer {
+  transform: none; visibility: visible; transition: transform 0.18s ease;
+}
+.drawer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid var(--hairline);
+}
+.drawer-title {
+  font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--text-secondary);
+}
+.drawer-close { background: none; border: 0; color: var(--text-muted); cursor: pointer; }
+.drawer-close:hover { color: var(--text-primary); }
+.drawer-body { flex: 1; overflow-y: auto; padding: 14px 16px 24px; }
+.drawer-body .shiny-input-container { width: 100%; margin-bottom: 0; }
+/* Room between one filter and the next, and between a label and its control. */
+.drawer-body .filter-with-clear { margin-bottom: 22px; }
+.drawer-body .control-label { display: block; margin-bottom: 8px; }
+.drawer-body .shiny-options-group { padding-top: 2px; }
+/* Only the list scrolls, so the label and its "clear" link stay put and the
+   scrollbar cannot sit under the link. */
+.drawer-body .filter-meta .shiny-options-group {
+  max-height: 240px; overflow-y: auto; padding-right: 10px;
+}
+
+@media (max-width: 900px) {
+  .nav-rail { display: none; }
+  .topbar-meta { display: none; }
+}
+
+/* Plotly's hover toolbar (camera, zoom, pan, lasso, reset) is hidden: these are
+   read-only summaries, and the toolbar sat on top of the chart corner. Delete
+   this rule to bring it back. */
+.js-plotly-plot .modebar-container { display: none !important; }
+
+/* The small name label that follows the mouse over bars and donut slices.
+   It sits beside the pointer with an arrow pointing at it; the script in the
+   page head positions it and adds .nametip-flip near the window's right edge.
+   On light cards it is the page's dark slate rather than black, with a soft
+   shadow; on dark cards it is black with a faint edge so it lifts off them. */
+.nametip {
+  --tip-bg: #2b3a4d;
+  --tip-edge: transparent;
+  position: fixed; z-index: 2000; display: none; pointer-events: none; white-space: pre-line;
+  padding: 5px 10px; border-radius: 6px;
+  font-size: 0.85rem; font-weight: 500; line-height: 1.35;
+  color: #f5f7fa; background: var(--tip-bg); border: 1px solid var(--tip-edge);
+  box-shadow: 0 4px 14px rgba(31, 45, 61, 0.18), 0 1px 3px rgba(31, 45, 61, 0.12);
+}
+[data-bs-theme="dark"] .nametip {
+  --tip-bg: #000;
+  --tip-edge: rgba(255, 255, 255, 0.35);
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+/* The arrow: a square turned 45 degrees, half of it outside the label, with
+   the label's fill and edge on its two outer sides. */
+.nametip::before {
+  content: ""; position: absolute; top: 50%; left: -5px;
+  width: 9px; height: 9px; margin-top: -4.5px;
+  background: var(--tip-bg);
+  border-left: 1px solid var(--tip-edge); border-bottom: 1px solid var(--tip-edge);
+  transform: rotate(45deg);
+}
+.nametip-flip::before {
+  left: auto; right: -5px;
+  border-left: 0; border-bottom: 0;
+  border-right: 1px solid var(--tip-edge); border-top: 1px solid var(--tip-edge);
+}
+
+/* ---- principals drill-down (prototype) ------------------------------------- */
+.pf-pick { min-width: 340px; }
+.pf-pick .form-group, .pf-pick .shiny-input-container { margin-bottom: 0; width: 100%; }
+.pf-head {
+  background: var(--surface-1); border: 1px solid var(--hairline-strong);
+  border-radius: 8px; padding: 14px 18px; margin-bottom: 14px;
+}
+.pf-title { font-size: 1.25rem; font-weight: 600; color: var(--text-primary); }
+.pf-sub { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-secondary); margin-bottom: 10px; }
+.pf-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; font-size: 0.85rem; }
+.pf-facts dt { font-weight: 500; color: var(--text-secondary); }
+.pf-facts dd { margin: 0; color: var(--text-primary); }
+.pf-chip {
+  display: inline-block; margin: 0 6px 2px 0; padding: 1px 8px; border-radius: 999px;
+  font-family: var(--font-mono); font-size: 0.74rem;
+  background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-border);
+}
+.pf-note { color: var(--text-secondary); font-size: 0.82rem; margin-bottom: 6px; }
+
+/* the question label and its Origin / Tool toggle share one line */
+.origin-tool-head { align-items: center; gap: 12px; margin-bottom: 0; }
+.origin-tool-head .row-question { margin-right: 0; }
+.origin-tool-head .seg { margin-top: 12px; }

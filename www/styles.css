@@ -21,27 +21,31 @@
   --flag-soft: #fbedec;
 
   --radius: 6px;
-  --font-ui: "Open Sans", "Source Sans Pro", system-ui, -apple-system,
-    "Segoe UI", Roboto, sans-serif;
+  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --shell-bg: #ffffff;
+  --card-accent: transparent;
 }
 
 [data-bs-theme="dark"] {
-  --surface-1: #1c2128;
-  --surface-2: #22282f;
-  --page: #14181d;
-  --text-primary: #eef1f4;
-  --text-secondary: #b3bcc6;
-  --text-muted: #8a949f;
-  --hairline: #2e353d;
-  --hairline-strong: #3d454e;
-  --accent: #5aa7e0;
-  --accent-soft: #1e2a35;
-  --accent-border: #33556f;
+  --surface-1: #131a2b;
+  --surface-2: #1a2238;
+  --page: #0a0e1a;
+  --shell-bg: #0d1322;
+  --text-primary: #e8ecf4;
+  --text-secondary: #9aa6bd;
+  --text-muted: #6b7896;
+  --hairline: #1f2a44;
+  --hairline-strong: #2a3656;
+  --accent: #4d8dff;
+  --accent-soft: #14233f;
+  --accent-border: #2a4a85;
+  --card-accent: #2f6bf0;
   --track: #22415a;
-  --good-text: #83b96a;
-  --good-soft: #1f2a1e;
-  --flag-text: #e08a85;
-  --flag-soft: #2c1d1d;
+  --good-text: #34d399;
+  --good-soft: #10281f;
+  --flag-text: #f87171;
+  --flag-soft: #2c1517;
 }
 
 body {
@@ -217,12 +221,16 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
 .stat-tile {
   background: var(--surface-1);
   border: 1px solid var(--hairline);
+  border-top: 2px solid var(--card-accent);
   border-radius: var(--radius);
   padding: 14px 18px;
 }
 .tile-label {
-  color: var(--text-secondary);
-  font-size: 0.84rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   font-weight: 400;
   display: flex; align-items: center; gap: 6px;
 }
@@ -236,20 +244,21 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
   /* proportional figures on big standalone numbers; tabular only in tables */
   font-variant-numeric: normal;
 }
-.tile-note { color: var(--text-muted); font-size: 0.78rem; min-height: 1em; }
-
-/* ---- verdict chips ------------------------------------------------------- */
-.verdict {
-  display: inline-block;
-  border-radius: 999px;
-  padding: 3px 12px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  margin-bottom: 8px;
+/* A name rather than a figure (see theme.stat_tile): one line, smaller, cut
+   with an ellipsis; the full name is in the title attribute. The line height
+   keeps the tile as tall as its numeric neighbours. */
+.tile-value-text {
+  font-size: 1.45rem;
+  line-height: calc(1.85rem * 1.3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.verdict-ok { background: var(--good-soft); color: var(--good-text); }
-.verdict-flag { background: var(--flag-soft); color: var(--flag-text); }
-.verdict-neutral { background: var(--surface-2); color: var(--text-secondary); }
+.tile-note { color: var(--text-muted); font-size: 0.78rem; min-height: 1em; }
+/* Tiles in one row share a height, so a tile with a short note does not sit
+   shorter than its neighbours. */
+.kpi-row > * { display: flex; }
+.kpi-row .stat-tile { flex: 1 1 auto; }
 
 /* ---- misc ---------------------------------------------------------------- */
 .inline-controls {
@@ -270,12 +279,15 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
   color: var(--accent); text-decoration: none; cursor: pointer;
 }
 .filter-with-clear .clear-link:hover { color: var(--accent); text-decoration: underline; }
-/* An empty checkbox group reads as "nothing shown" unless the empty state is
-   spelled out, so Provider and Models each say what no selection means. */
-.filter-hint {
-  color: var(--text-muted); font-size: 0.74rem; line-height: 1.4;
-  margin: -6px 0 2px;
+.help-ico {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; margin-left: 6px; vertical-align: middle;
+  border: 1px solid var(--text-muted); border-radius: 50%;
+  color: var(--text-muted); font-size: 0.65rem; font-weight: 600; line-height: 1;
+  cursor: help;
 }
+.help-ico:hover, .help-ico:focus { color: var(--accent); border-color: var(--accent); outline: none; }
+.hdr-flex-left { display: flex; align-items: center; gap: 8px; }
 .hdr-flex { display: flex; justify-content: space-between; align-items: center; width: 100%; }
 .export-btn {
   font-size: 0.74rem; padding: 2px 10px;
@@ -327,16 +339,26 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
 }
 
 /* ---- data grids ---------------------------------------------------------- */
-shiny-data-frame { font-variant-numeric: tabular-nums; font-size: 0.82rem; }
+shiny-data-frame { font-variant-numeric: tabular-nums; font-size: 0.9rem; }
 /* headers sit one step off the card surface so they read as a distinct band
    from the body rows -- surface-2 is darker in light mode, lighter in dark */
 shiny-data-frame table > thead th {
   background: var(--surface-2) !important;
   border-bottom: 1px solid var(--hairline-strong) !important;
-  color: var(--text-secondary) !important;
-  font-weight: 600;
+  color: var(--text-primary) !important;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  padding: 9px 12px !important;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 500;
 }
+/* One line per cell: wrapped names ("claude-sonnet-4-" / "6") broke the rows.
+   A wide table scrolls sideways inside its card instead. */
+shiny-data-frame table th,
+shiny-data-frame table td { white-space: nowrap !important; }
 shiny-data-frame table > tbody td {
+  padding: 8px 12px !important;
   border-top: 1px solid var(--hairline) !important;
   color: var(--text-primary);
 }
@@ -355,7 +377,7 @@ body .card-body shiny-data-frame .shiny-data-grid {
 }
 
 /* ---- refresh control ----------------------------------------------------- */
-.refresh-btn { margin-top: 6px; width: 100%; }
+.refresh-btn { white-space: nowrap; }
 /* Quieter than Refresh: two identical buttons stacked would give a discarding
    action the same weight as the one that loads data. `.btn.` is needed to outrank
    the `.btn.action-button` accent treatment above. */
@@ -430,4 +452,23 @@ body .card-body shiny-data-frame .shiny-data-grid {
   color: var(--text-muted);
   font-size: 0.85rem;
   padding: 8px 2px 2px;
+}
+
+/* Conversations: the table's filters, and the one-line readings under a chart. */
+.conv-filters { display: flex; gap: 12px; flex-wrap: wrap; }
+.card-note {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  padding: 6px 14px 8px;
+}
+.conv-one { margin-bottom: 12px; }
+
+.unpriced-note {
+  border-left: 3px solid #e0a72c;
+  background: color-mix(in srgb, #e0a72c 10%, transparent);
+  color: var(--text);
+  font-size: 0.85rem;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border-radius: 4px;
 }
