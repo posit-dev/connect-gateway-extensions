@@ -16,31 +16,47 @@ All three time parameters are required:
     server widens the range by one day at each end. This module therefore
     filters on `start_time` as well.
   - `as_of` is an exclusive upper bound on `ingest_time`. It pins the bytes
-    behind the URL, which matters because DuckDB reads one Parquet file with
-    several range requests: the footer first, then the column chunks. Without
-    a watermark the newest partition can grow between those requests and the
-    query returns a plausible wrong answer. The server rejects an `as_of`
-    newer than one minute ago, because a record can reach disk after the
-    ingest time it carries.
+    behind the URL, so one window and watermark always name the same file.
+    The server rejects an `as_of` newer than one minute ago, because a record
+    can reach disk after the ingest time it carries.
+
+The export is fetched with ONE plain GET into a local temporary file, and
+DuckDB reads that file. It is not read over HTTP with httpfs: httpfs makes a
+HEAD, a footer range request, then one range request per column chunk (about
+30 for a 1.6M-row export), and retries any range answered with a 200 before
+falling back to a full GET. On a server that converts the export on demand
+(17-30 s for a large window) every one of those requests can pay the
+conversion, so a single download is both faster and independent of how the
+server handles Range and caching.
 
 The server declares the column types, so the export is read with no schema
 probe. Conversation content (`system_instructions`, `input_messages`,
 `output_messages`) is never exported, and this dashboard never asks for it.
 
-The export is read one time, at start, into the local `gateway_events` table.
-Every dashboard query then runs against local data. Restart the app, or press
-"Refresh data", to read a newer window.
+The export is read into the local `gateway_events` table, and every dashboard
+query runs against local data. The first load reads the whole window; "Refresh
+data" then asks only for what Connect ingested since, keyed on `ingest_time`
+(see load()). The table is also kept as a Parquet snapshot in the app's
+working directory, so a restarted process starts from it instead of from a
+full export.
 """
 
 from __future__ import annotations
 
+import hashlib
+import http.client
 import json
 import os
 import re
+import shutil
+import tempfile
 import threading
+import uuid
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import duckdb
 import pandas as pd
@@ -48,7 +64,11 @@ import pandas as pd
 CONNECT_SERVER = os.environ.get("CONNECT_SERVER")
 CONNECT_API_KEY = os.environ.get("CONNECT_API_KEY")
 EXPORT_PATH = "__api__/v1/system/gateway/usage/export"
-LOOKBACK_DAYS = 90
+LOOKBACK_DAYS = 30
+
+# How long the export GET may wait on the socket: for the server to finish
+# converting (17-30 s for 1.6M rows) before the first byte, and between chunks.
+EXPORT_TIMEOUT = 300
 
 # How far behind the clock the watermark sits. The server demands at least one
 # minute; two absorbs the skew between this process and Connect.
@@ -69,6 +89,7 @@ _EXPORT_ENDPOINT = f"{CONNECT_SERVER.rstrip('/')}/{EXPORT_PATH}"
 # The gateway pricing endpoints share the export's base. `pricing` is the
 # vendored litellm default catalog; `models` is the admin override table.
 _GATEWAY_BASE = f"{CONNECT_SERVER.rstrip('/')}/__api__/v1/system/gateway"
+_API_BASE = f"{CONNECT_SERVER.rstrip('/')}/__api__/v1"
 _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 
 _lock = threading.Lock()
@@ -77,12 +98,6 @@ _con = duckdb.connect()
 # TIMESTAMP below shifts by the server's local offset and the "UTC" the charts
 # claim is not the UTC they show.
 _con.execute("SET TimeZone='UTC'")
-_con.execute("INSTALL httpfs; LOAD httpfs;")
-_con.execute(
-    """CREATE OR REPLACE SECRET gateway (
-           TYPE http, SCOPE ?, EXTRA_HTTP_HEADERS MAP {'Authorization': ?})""",
-    [CONNECT_SERVER, f"Key {CONNECT_API_KEY}"],
-)
 
 # Set by load(): when the table was read, the window it covers, and its size.
 INFO: dict = {}
@@ -91,10 +106,21 @@ INFO: dict = {}
 # tuple of US dollars per million tokens (input, output, cache write, cache
 # read). The provider is the catalog name ("anthropic", "aws.bedrock"); the
 # region is a Bedrock inference-region token ("us", "eu", ...) or "" for the
-# base rate; the model is the family that gateway_events.model carries. None
-# means the server does not serve the pricing endpoint, or the fetch failed; the
-# caller then falls back to its own list-price table.
+# base rate; the model is the family that gateway_events.model carries. There
+# is no built-in price list: the first load() fails if the catalog cannot be
+# read, and a later failed refresh keeps the last good catalog.
 PRICES: dict | None = None
+
+# Set by load(): the human-readable name of each content item, keyed by guid.
+# The export carries only the guid. The name comes from the content list (an
+# administrator key sees every item): its title, else its name. Empty means
+# the list could not be read, and callers fall back to showing the guid.
+CONTENT_NAMES: dict[str, str] = {}
+
+# Set by load(): Connect group memberships as (user_guid, group_guid, group_name).
+# A user can be in many groups, so anything summed by group double-counts the
+# people who are in more than one. Empty when the groups API could not be read.
+GROUP_MEMBERS: list[tuple[str, str, str]] = []
 
 _MODEL_DATE_REV = re.compile(r"(-\d{8})?(-v\d+(:\d+)?)?$")
 
@@ -128,6 +154,64 @@ def _get_json(url: str):
             return json.loads(r.read())
     except (urllib.error.URLError, OSError, ValueError):
         return None
+
+
+def _fetch_content_names() -> dict[str, str] | None:
+    """guid -> title (else name) for every content item, or None on failure.
+
+    An unexpected shape also returns None, so one bad refresh keeps the last
+    good names instead of dropping every label back to a guid.
+    """
+    items = _get_json(f"{_API_BASE}/content")
+    if not isinstance(items, list):
+        return None
+    names: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict) or not item.get("guid"):
+            continue
+        label = (item.get("title") or "").strip() or (item.get("name") or "").strip()
+        if label:
+            names[item["guid"]] = label
+    return names
+
+
+def _results(body) -> list | None:
+    """The rows of a Connect list response: a bare list or {"results": [...]}."""
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict) and isinstance(body.get("results"), list):
+        return body["results"]
+    return None
+
+
+def _fetch_groups() -> list[tuple[str, str, str]] | None:
+    """Every (user_guid, group_guid, group_name) membership, or None on failure.
+
+    One request for the group list (paged), then one per group for its members,
+    so this is slow on a server with thousands of groups. It runs beside the
+    export download, off the caller's path.
+    """
+    groups, page = [], 1
+    while True:
+        rows = _results(_get_json(f"{_API_BASE}/groups?page_size=500&page_number={page}"))
+        if rows is None:
+            return None  # a partial list would misstate every group
+        groups += [g for g in rows if isinstance(g, dict) and g.get("guid")]
+        if len(rows) < 500:
+            break
+        page += 1
+    out = []
+    for g in groups:
+        members = _results(_get_json(f"{_API_BASE}/groups/{g['guid']}/members"))
+        for m in members or []:
+            if isinstance(m, dict) and m.get("guid"):
+                out.append((m["guid"], g["guid"], g.get("name") or g["guid"]))
+    return out
+
+
+def content_name(guid) -> str | None:
+    """The content's title, or None when it is unknown (deleted, or no list)."""
+    return CONTENT_NAMES.get(str(guid))
 
 
 def _rates(row) -> tuple | None:
@@ -218,8 +302,7 @@ def _fetch_prices() -> dict | None:
     them, so this does. A missing catalog returns None; a missing override
     table just leaves the defaults in place. An unexpected shape also returns
     None: a non-numeric rate, a renamed or missing field, or a list where an
-    object was expected. The caller then keeps its fallback table rather than
-    crash the load.
+    object was expected. The caller decides what a missing catalog means.
     """
     pricing = _get_json(f"{_GATEWAY_BASE}/pricing")
     if not pricing:
@@ -242,23 +325,33 @@ def _window() -> tuple[str, str, str]:
     """The export window and its watermark, as RFC 3339 strings.
 
     GATEWAY_FROM and GATEWAY_TO pin the window; without them it trails the
-    clock. The watermark is always derived, and truncated to the minute so
-    that repeated reads of one window hit the server's conversion cache.
+    watermark. Everything is truncated to the minute: Connect caches a
+    conversion for ten minutes under (from, to, as_of), so a second process,
+    or a restart, inside the same minute reuses the build instead of paying
+    for another one. A window that carried the clock's seconds never hit.
+
+    The trailing window ends at the watermark. Nothing newer can be in the
+    export anyway: as_of bounds ingest_time, and a call starts before it is
+    ingested.
     """
     now = datetime.now(timezone.utc)
     as_of = (now - AS_OF_LAG).replace(second=0, microsecond=0)
     return (
         os.environ.get("GATEWAY_FROM")
-        or (now - timedelta(days=LOOKBACK_DAYS)).strftime(_RFC3339),
-        os.environ.get("GATEWAY_TO") or now.strftime(_RFC3339),
+        or (as_of - timedelta(days=LOOKBACK_DAYS)).strftime(_RFC3339),
+        os.environ.get("GATEWAY_TO") or as_of.strftime(_RFC3339),
         as_of.strftime(_RFC3339),
     )
 
 
-# The statement that reads the export into the local table.
+# The SELECT that shapes one downloaded export into gateway_events rows. A full
+# load wraps it in CREATE OR REPLACE TABLE gateway_events, so a failed reload
+# rolls back and leaves the data already loaded in place; an incremental one
+# wraps it in a temporary delta table and merges that (see _merge_delta).
 #
-# CREATE OR REPLACE, so a failed reload rolls back and leaves the data that is
-# already loaded in place.
+# Parameters: the file, the window's start and end (on start_time), and the
+# ingest_time cutoff below which rows are already held (the epoch for a full
+# load).
 #
 # Three identities can be attached to one call, and they are independent of the
 # content axis:
@@ -280,9 +373,12 @@ def _window() -> tuple[str, str, str]:
 # Connect writes an email beside each name. On a server whose usernames are
 # already email addresses the two columns hold the same value.
 _SHAPE = """
-CREATE OR REPLACE TABLE gateway_events AS
 SELECT
     start_time::TIMESTAMP                              AS ts,
+    -- When Connect wrote the record, which is when the call finished. The
+    -- export is append-only in this column, which is what an incremental
+    -- refresh keys on.
+    ingest_time,
     start_time::TIMESTAMP::DATE                        AS day,
     strftime(start_time::TIMESTAMP, '%Y-%m')           AS month,
     hour(start_time::TIMESTAMP)                        AS hour,
@@ -290,7 +386,7 @@ SELECT
     node_name,
     provider,
     operation,
-    -- Billed model, normalized to the family that EST_PRICES is keyed by.
+    -- Billed model, normalized to the family that PRICES is keyed by.
     --
     -- response_model is EMPTY -- not null -- on failed calls and on some
     -- successful ones, so NULLIF is what makes the fallback to request_model
@@ -334,6 +430,10 @@ SELECT
     response_id,
     server_address,
     server_port,
+    -- ALL input, cached included: Connect records the provider's input plus
+    -- cache_creation and cache_read for both Anthropic and Bedrock. Fresh
+    -- (uncached) input is input_tokens - cache_creation - cache_read, which is
+    -- how est_cost prices it.
     input_tokens,
     output_tokens,
     cache_creation_input_tokens                        AS cache_creation_tokens,
@@ -379,14 +479,55 @@ SELECT
     -- session_id and was always empty. there should never be both a session_id
     -- and a conversation_id.
     COLUMNS('^(conversation_id|session_id)$')          AS conversation_id,
-    -- Where the call came from. The content fields are null for a request that
-    -- did not originate in deployed content, which is what marks a Workbench
-    -- session or a direct API caller.
-    CASE WHEN content_guid IS NOT NULL THEN 'connect' ELSE 'workbench' END
-                                                       AS source
+    -- Caller-supplied attribution (the Gateway-Metadata request header): a JSON
+    -- object such as {"team":"data-science","workbench-session-id":"d1ac60de"}.
+    -- Connect keeps at most 16 entries and drops any key sent twice. NULL when
+    -- the request carried none, which is every Connect-content call and any row
+    -- from a server that predates the field. The caller wrote the values and
+    -- Connect does not verify them, so they label usage; they never authorise it.
+    __REQUEST_METADATA__                               AS request_metadata,
+    -- The keys worth reading at a glance, pulled out of the JSON. Keys are 1 to
+    -- 32 lowercase letters, digits and hyphens, hence the quoted paths.
+    json_extract_string(request_metadata, '$."team"')                   AS team,
+    json_extract_string(request_metadata, '$."cost-center"')            AS cost_center,
+    json_extract_string(request_metadata, '$."tier"')                   AS tier,
+    json_extract_string(request_metadata, '$."enforced"')               AS enforced,
+    json_extract_string(request_metadata, '$."workbench-session-id"')   AS workbench_session_id,
+    json_extract_string(request_metadata, '$."workbench-session-name"') AS workbench_session_name,
+    -- Workbench also names the project the session has open, when it has one.
+    json_extract_string(request_metadata, '$."workbench-project-id"')   AS workbench_project_id,
+    json_extract_string(request_metadata, '$."workbench-project-name"') AS workbench_project_name,
+    json_extract_string(request_metadata, '$."workbench-project-path"') AS workbench_project_path,
+    -- The caller's raw User-Agent (at most 512 bytes), kept as sent. The client
+    -- writes it, so it labels usage and never authorises it. NULL on a server
+    -- that predates the field.
+    __USER_AGENT__                                     AS user_agent,
+    -- Which tool made the call, read from the User-Agent; the first match wins.
+    -- A blank header is NULL, so the tool charts leave it out rather than
+    -- showing a bucket that says nothing. "API SDKs" is a provider SDK or HTTP
+    -- library with no tool behind it, i.e. scripts and apps calling the API.
+    CASE
+        WHEN COALESCE(__USER_AGENT__, '') = ''         THEN NULL
+        WHEN regexp_matches(__USER_AGENT__, '(?i)positassistant') THEN 'Posit Assistant'
+        WHEN regexp_matches(__USER_AGENT__, '(?i)claude')  THEN 'Claude Code'
+        WHEN regexp_matches(__USER_AGENT__, '(?i)copilot') THEN 'GitHub Copilot'
+        WHEN regexp_matches(__USER_AGENT__, '(?i)codex')   THEN 'Codex CLI'
+        WHEN regexp_matches(__USER_AGENT__, '(?i)(^|[\\s(;])pi([/-]|-coding-agent)') THEN 'Pi'
+        WHEN regexp_matches(__USER_AGENT__, '(?i)r-ellmer') THEN 'R (ellmer)'
+        WHEN regexp_matches(__USER_AGENT__,
+             '(?i)^(openai|anthropic|azure-openai|google-genai|litellm)/|python-(requests|httpx)|aiohttp|^python/|^node|axios|undici|^curl/|^go-http-client|okhttp')
+                                                       THEN 'API SDKs'
+        ELSE 'Other'
+    END                                                AS tool,
+    -- Where the call came from: connect (deployed content), workbench or local
+    -- (a Posit client naming its host IDE in the User-Agent), else NULL. Connect
+    -- derives it at export time. An older server sends neither column, so
+    -- there anything that is not content is "workbench", as it always was.
+    __ORIGIN__                                         AS source
 FROM read_parquet(?)
 WHERE start_time >= ?::TIMESTAMPTZ
   AND start_time <  ?::TIMESTAMPTZ
+  AND ingest_time >= ?::TIMESTAMPTZ
 """
 
 
@@ -405,76 +546,409 @@ _ADVICE = {
 }
 
 
-def _probe(url: str) -> tuple[int | None, str]:
-    """Ask the endpoint directly what it objects to.
+def _download(url: str) -> Path:
+    """GET the export once and stream it into a temporary Parquet file.
 
-    httpfs reports 400, 401, 403 and 413 as "HTTP 0" and never keeps the
-    response body, so the three failures an operator is most likely to hit --
-    a refused key, a key that is not an administrator's, and a window too
-    large -- all arrive indistinguishable. The route answers every refusal
-    with a plain-text reason, so one small request recovers both the status
-    and the server's own words. It runs only on the error path.
-
-    Range caps the reply at one byte in case the endpoint answers after all.
+    The caller deletes the file. The body is copied in 1 MB pieces, so the
+    export never sits in Python memory whole. A refusal arrives as an ordinary
+    HTTP status with the server's plain-text reason in the body, which is what
+    the error message quotes.
     """
     req = urllib.request.Request(
-        url,
-        method="GET",
-        headers={"Authorization": f"Key {CONNECT_API_KEY}", "Range": "bytes=0-0"},
+        url, method="GET", headers={"Authorization": f"Key {CONNECT_API_KEY}"}
     )
+    fd, name = tempfile.mkstemp(suffix=".parquet")
+    path = Path(name)
     try:
-        with urllib.request.urlopen(req, timeout=5) as r:
-            return r.status, ""
+        with os.fdopen(fd, "wb") as out, urllib.request.urlopen(
+            req, timeout=EXPORT_TIMEOUT
+        ) as r:
+            while chunk := r.read(1 << 20):
+                out.write(chunk)
     except urllib.error.HTTPError as err:
-        return err.code, err.read().decode("utf-8", "replace").strip()
-    except OSError:
-        # The endpoint is unreachable, which the caller's error already says.
-        return None, ""
+        path.unlink(missing_ok=True)
+        # Connect answers in plain text; a proxy in front of it may send an
+        # HTML page instead, so flatten and cap whatever came back.
+        reason = " ".join(err.read(2000).decode("utf-8", "replace").split())[:300]
+        advice = _ADVICE.get(err.code, "check CONNECT_SERVER and CONNECT_API_KEY")
+        detail = f"{err.code}: {reason}" if reason else str(err.code)
+        raise RuntimeError(
+            f"cannot read the usage export at {url} -- {advice} ({detail})"
+        ) from err
+    except (OSError, http.client.HTTPException) as err:
+        # Unreachable host, timeout, or a connection cut mid-body
+        # (IncompleteRead is an HTTPException, not an OSError).
+        path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"cannot read the usage export at {url} -- check CONNECT_SERVER, and "
+            f"that the export finishes within {EXPORT_TIMEOUT}s ({err})"
+        ) from err
+    return path
 
 
-def _explain(url: str, e: duckdb.Error) -> RuntimeError:
-    """Turn a transport failure into the operator's next move."""
-    status = getattr(e, "status_code", None) or None
-    reason = ""
-    if status is None or status not in _ADVICE:
-        status, reason = _probe(url)
-    advice = _ADVICE.get(
-        status,
-        "check CONNECT_SERVER, CONNECT_API_KEY, and "
-        "that the endpoint serves range requests",
-    )
-    detail = f"{status}: {reason}" if reason else (str(e).splitlines() or [""])[0]
-    return RuntimeError(f"cannot read the usage export at {url} -- {advice} ({detail})")
+_EPOCH = "1970-01-01T00:00:00Z"
 
 
-def load() -> dict:
-    """Read the export into the local table, and report what was loaded.
+def _shape_into(target: str, path: Path, window_from: str, window_to: str, cutoff: str) -> None:
+    """Run _SHAPE over one downloaded export into `target` (a CREATE ... AS).
 
-    Called at import and again for every refresh. A failure leaves the data
-    already loaded in place, so a refresh that cannot reach the endpoint is
-    not destructive.
+    The caller holds _lock.
     """
-    window_from, window_to, as_of = _window()
-    url = (
+    args = [str(path), window_from, window_to, cutoff]
+    # A Connect server that predates a column has none of it in its export.
+    # Read what it has and fill the rest: first without origin and user agent,
+    # then also without request metadata. Each step is tried only if the last
+    # one failed on a column it lacks.
+    steps = [
+        {"__REQUEST_METADATA__": "request_metadata::JSON",
+         "__USER_AGENT__": "user_agent::VARCHAR",
+         "__ORIGIN__": "origin::VARCHAR"},
+        {"__REQUEST_METADATA__": "request_metadata::JSON",
+         "__USER_AGENT__": "NULL::VARCHAR",
+         "__ORIGIN__": "CASE WHEN content_guid IS NOT NULL THEN 'connect' ELSE 'workbench' END"},
+        {"__REQUEST_METADATA__": "NULL::JSON",
+         "__USER_AGENT__": "NULL::VARCHAR",
+         "__ORIGIN__": "CASE WHEN content_guid IS NOT NULL THEN 'connect' ELSE 'workbench' END"},
+    ]
+    for i, subs in enumerate(steps):
+        sql = _SHAPE
+        for key, val in subs.items():
+            sql = sql.replace(key, val)
+        try:
+            _con.execute(target + sql, args)
+            return
+        except duckdb.BinderException as e:
+            cols = ("user_agent", "origin") if i == 0 else ("request_metadata",)
+            if i == len(steps) - 1 or not any(c in str(e) for c in cols):
+                raise
+
+
+def _read_export(path: Path, window_from: str, window_to: str) -> int:
+    """Replace gateway_events with one downloaded export; return its row count."""
+    with _lock:
+        # The epoch as the ingest cutoff: a full load keeps every row.
+        _shape_into(
+            "CREATE OR REPLACE TABLE gateway_events AS ",
+            path, window_from, window_to, _EPOCH,
+        )
+        return _con.sql("SELECT COUNT(*) FROM gateway_events").fetchone()[0]
+
+
+def _merge_export(path: Path, window_from: str, window_to: str, cutoff: str) -> int:
+    """Merge an incremental export into gateway_events; return the rows it added.
+
+    The export covers every record ingested at or after `cutoff`. The local
+    rows from that same instant on are replaced by it, in one transaction, so
+    the result is the table a full load would have built -- whatever day the
+    cutoff falls in. A record that was in flight at the last load, or that
+    reached disk late, sits above the cutoff and is simply read again. Rows
+    that have aged out of the trailing window are dropped in the same step.
+    """
+    with _lock:
+        _shape_into(
+            "CREATE OR REPLACE TEMP TABLE gateway_delta AS ",
+            path, window_from, window_to, cutoff,
+        )
+        try:
+            _con.execute("BEGIN TRANSACTION")
+            _con.execute(
+                """DELETE FROM gateway_events
+                   WHERE ingest_time >= ?::TIMESTAMPTZ
+                      OR ts < ?::TIMESTAMPTZ::TIMESTAMP""",
+                [cutoff, window_from],
+            )
+            _con.execute("INSERT INTO gateway_events BY NAME SELECT * FROM gateway_delta")
+            _con.execute("COMMIT")
+        except BaseException:
+            _con.execute("ROLLBACK")
+            raise
+        added = _con.sql("SELECT COUNT(*) FROM gateway_delta").fetchone()[0]
+        _con.execute("DROP TABLE gateway_delta")
+        return added
+
+
+# ---- incremental refresh and the shared snapshot ----------------------------
+#
+# A full export is what costs: Connect converts every JSONL file in the window,
+# and that scales with the window (17-30 s for 1.6M rows). A refresh therefore
+# asks only for what was ingested since the last load. ingest_time is the key:
+# the export filters on it (as_of), the log is append-only in it, and it is the
+# time Connect wrote the record, so nothing can appear below a watermark that
+# has already been read -- except a record that reached disk late, which is
+# what REFETCH_MARGIN re-reads.
+#
+# The table is also saved, as Parquet, in the app's working directory. Connect
+# keeps that directory across restarts and idle shutdowns and shares it with
+# every process of this app; a redeploy wipes it, which costs one full load. A
+# process that starts with a snapshot to hand loads it from local disk and
+# fetches only the gap since it was written.
+
+# How far below the last watermark a refresh starts. Connect stamps ingest_time
+# before the record is queued for its writer, so one can land after a
+# conversion that should have seen it; this is how late it may be.
+REFETCH_MARGIN = timedelta(minutes=10)
+
+# A full reload this often regardless, which bounds how long a record later
+# than REFETCH_MARGIN can stay missing, and how long incremental merges run
+# unchecked against a fresh read.
+FULL_RELOAD_EVERY = timedelta(hours=24)
+
+# Where the snapshot lives, best first:
+#   GATEWAY_CACHE_DIR         an explicit choice, such as an admin's shared mount
+#   CONNECT_CONTENT_DATA_DIR  Connect's per-content persistent directory
+#                             (EarlyAccess.PersistentDataDirectories), which
+#                             survives deploys and restarts, off-host included
+#   the working directory     kept until the next deploy, shared by processes
+CACHE_DIR = Path(
+    os.environ.get("GATEWAY_CACHE_DIR")
+    or (
+        Path(os.environ["CONNECT_CONTENT_DATA_DIR"]) / "gateway-cache"
+        if os.environ.get("CONNECT_CONTENT_DATA_DIR")
+        else Path(__file__).parent / ".gateway-cache"
+    )
+)
+SNAPSHOT = CACHE_DIR / "gateway_events.parquet"
+
+# What gateway_events holds: the watermark it was read up to, and when it was
+# last read in full. None until the first load.
+_state: dict | None = None
+
+# One load at a time in this process: a refresh that arrives during a load
+# waits for it rather than starting a second export.
+_load_lock = threading.Lock()
+
+
+def _parse(ts: str) -> datetime:
+    return datetime.strptime(ts, _RFC3339).replace(tzinfo=timezone.utc)
+
+
+def _settings() -> str:
+    """What a snapshot must have been built with to be reused.
+
+    The shape's text stands in for a schema version, and the server keeps a
+    snapshot taken against the mock from being read against a real Connect.
+    """
+    return json.dumps(
+        [
+            hashlib.sha256(_SHAPE.encode()).hexdigest()[:16],
+            CONNECT_SERVER,
+            LOOKBACK_DAYS,
+            os.environ.get("GATEWAY_FROM"),
+            os.environ.get("GATEWAY_TO"),
+        ]
+    )
+
+
+def _sql_path(p: Path) -> str:
+    return "'" + str(p).replace("'", "''") + "'"
+
+
+def _read_snapshot(window_from: str) -> dict | None:
+    """Load the shared snapshot into gateway_events, if it is worth using.
+
+    Returns its state, or None when there is none, it was built with other
+    settings, it is due a full reload anyway, or it cannot be read. Any
+    failure here only means a full load.
+
+    Another process may replace the snapshot mid-read, and DuckDB opens a
+    Parquet file more than once (footer, then row groups). Reading through a
+    private hard link pins one version: the rename replaces the name, never
+    the file the link points at.
+    """
+    if not SNAPSHOT.exists():
+        return None
+    pinned = CACHE_DIR / f".read-{os.getpid()}-{uuid.uuid4().hex}.parquet"
+    try:
+        try:
+            os.link(SNAPSHOT, pinned)
+        except OSError:
+            shutil.copyfile(SNAPSHOT, pinned)  # a filesystem without hard links
+        with _lock:
+            meta = dict(
+                _con.sql(
+                    "SELECT decode(key), decode(value) FROM "
+                    f"parquet_kv_metadata({_sql_path(pinned)})"
+                ).fetchall()
+            )
+            state = {"as_of": _parse(meta["as_of"]), "full_at": _parse(meta["full_at"])}
+            stale = (
+                meta.get("settings") != _settings()
+                or datetime.now(timezone.utc) - state["full_at"] >= FULL_RELOAD_EVERY
+                or state["as_of"] - REFETCH_MARGIN < _parse(window_from)
+            )
+            if stale:
+                return None
+            _con.execute(
+                "CREATE OR REPLACE TABLE gateway_events AS "
+                f"SELECT * FROM read_parquet({_sql_path(pinned)})"
+            )
+        return state
+    except (OSError, duckdb.Error, KeyError, ValueError):
+        return None
+    finally:
+        pinned.unlink(missing_ok=True)
+
+
+def _write_snapshot(state: dict) -> None:
+    """Save gateway_events for the next process, atomically.
+
+    Written to a private name and renamed over the snapshot, so a reader sees
+    the old file or the new one, never a partial one; two processes that both
+    write simply leave the later. It runs on its own DuckDB connection, so the
+    dashboard's queries are not held behind it. Failing to save costs the next
+    process a full load and nothing else, so failures are swallowed.
+    """
+    with _load_lock:
+        tmp = CACHE_DIR / f".write-{os.getpid()}-{uuid.uuid4().hex}.parquet"
+        kv = {
+            "as_of": state["as_of"].strftime(_RFC3339),
+            "full_at": state["full_at"].strftime(_RFC3339),
+            "settings": _settings(),
+        }
+        kv_sql = ", ".join(
+            f"{k}: '{v.replace(chr(39), chr(39) * 2)}'" for k, v in kv.items()
+        )
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            cur = _con.cursor()
+            try:
+                cur.execute(
+                    f"COPY gateway_events TO {_sql_path(tmp)} "
+                    f"(FORMAT parquet, COMPRESSION zstd, KV_METADATA {{{kv_sql}}})"
+                )
+            finally:
+                cur.close()
+            os.replace(tmp, SNAPSHOT)
+        except (OSError, duckdb.Error):
+            tmp.unlink(missing_ok=True)
+
+
+def _export_url(window_from: str, window_to: str, as_of: str) -> str:
+    return (
         f"{_EXPORT_ENDPOINT}?from={window_from}&to={window_to}"
         f"&as_of={as_of}&format=parquet"
     )
-    try:
-        with _lock:
-            _con.execute(_SHAPE, [url, window_from, window_to])
-            rows = _con.sql("SELECT COUNT(*) FROM gateway_events").fetchone()[0]
-    except (duckdb.HTTPException, duckdb.IOException) as e:
-        # httpfs reports an unreachable host, a refused key and a server-side
-        # refusal all as transport errors.
-        raise _explain(url, e) from e
 
-    # Fetched outside the lock: it is network I/O, and the assignment is atomic.
-    # A failure leaves PRICES as it was, so the caller keeps the last good
-    # catalog rather than dropping to its fallback on one bad refresh.
+
+def _ingest(url: str, read) -> int:
+    """Download one export and hand the file to `read`; always delete it."""
+    path = _download(url)
+    try:
+        return read(path)
+    except (duckdb.IOException, duckdb.InvalidInputException) as e:
+        # The body arrived but is not a Parquet file DuckDB can read.
+        raise RuntimeError(
+            f"the usage export at {url} is not a readable Parquet file ({e})"
+        ) from e
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# The export, the price catalog and the content list are independent requests,
+# so load() runs them side by side: the two small ones finish while the export
+# is still converting. The fourth worker saves the snapshot.
+_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="usage-load")
+
+
+def load() -> dict:
+    """Bring gateway_events up to date, and report what was loaded.
+
+    Called at import and again for every refresh. The first load in a process
+    starts from the shared snapshot when there is a usable one; after that,
+    each load fetches only what was ingested since the last, with a full
+    reload every FULL_RELOAD_EVERY. A failure leaves the data already loaded
+    in place, so a refresh that cannot reach the endpoint is not destructive.
+    The query lock is held only while DuckDB reads the downloaded file, not
+    during the download, so queries keep running meanwhile.
+    """
+    with _load_lock:
+        return _load()
+
+
+def _load() -> dict:
+    global _state
+    window_from, window_to, as_of = _window()
+    prices_f = _pool.submit(_fetch_prices)
+    names_f = _pool.submit(_fetch_content_names)
+    groups_f = _pool.submit(_fetch_groups)
+
+    source = "export"
+    if _state is None:
+        _state = _read_snapshot(window_from)
+        if _state is not None:
+            source = "snapshot"
+
+    now = datetime.now(timezone.utc)
+    incremental = (
+        _state is not None
+        and now - _state["full_at"] < FULL_RELOAD_EVERY
+        and _state["as_of"] - REFETCH_MARGIN >= _parse(window_from)
+    )
+    if incremental:
+        # Never move the watermark backwards. A snapshot written by another
+        # process (another node, in HA) can be a little ahead of this clock,
+        # and from > to is a request Connect refuses.
+        as_of = max(as_of, _state["as_of"].strftime(_RFC3339))
+        cutoff = (_state["as_of"] - REFETCH_MARGIN).strftime(_RFC3339)
+        # The request window only picks the partitions to convert; the trailing
+        # window itself is applied on start_time, as for a full load.
+        new_rows = _ingest(
+            _export_url(cutoff, as_of, as_of),
+            lambda p: _merge_export(p, window_from, window_to, cutoff),
+        )
+        full_at = _state["full_at"]
+    else:
+        new_rows = _ingest(
+            _export_url(window_from, window_to, as_of),
+            lambda p: _read_export(p, window_from, window_to),
+        )
+        full_at = now
+    _state = {"as_of": _parse(as_of), "full_at": full_at}
+    with _lock:
+        rows = _con.sql("SELECT COUNT(*) FROM gateway_events").fetchone()[0]
+
+    # A failed refresh keeps the last good catalog. With no catalog at all the
+    # load fails, as it does for the export: spend has no other source.
     global PRICES
-    fetched = _fetch_prices()
+    fetched = prices_f.result()
     if fetched is not None:
         PRICES = fetched
+    elif PRICES is None:
+        raise RuntimeError(
+            f"cannot read the gateway price catalog at {_GATEWAY_BASE}/pricing -- "
+            "check that this Connect server serves it and that CONNECT_API_KEY "
+            "may read it"
+        )
+
+    global CONTENT_NAMES
+    names = names_f.result()
+    if names is not None:
+        CONTENT_NAMES = names
+    with _lock:
+        # A table, so SQL (the Raw Data grid) can join the names in.
+        _con.execute(
+            "CREATE OR REPLACE TABLE content_names (content_guid VARCHAR, content_name VARCHAR)"
+        )
+        if CONTENT_NAMES:
+            _con.executemany(
+                "INSERT INTO content_names VALUES (?, ?)", list(CONTENT_NAMES.items())
+            )
+
+    global GROUP_MEMBERS
+    members = groups_f.result()
+    if members is not None:
+        GROUP_MEMBERS = members
+    with _lock:
+        _con.execute(
+            "CREATE OR REPLACE TABLE user_groups "
+            "(user_guid VARCHAR, group_guid VARCHAR, group_name VARCHAR)"
+        )
+        if GROUP_MEMBERS:
+            _con.executemany("INSERT INTO user_groups VALUES (?, ?, ?)", GROUP_MEMBERS)
+
+    # Saved off the caller's path: it takes a second or two at 1.6M rows, and
+    # _write_snapshot takes _load_lock, so it finishes before the next load.
+    _pool.submit(_write_snapshot, dict(_state))
 
     INFO.update(
         loaded_at=datetime.now(timezone.utc),
@@ -482,9 +956,13 @@ def load() -> dict:
         window_to=window_to,
         as_of=as_of,
         rows=rows,
-        priced_models=(
-            None if PRICES is None else len({(p, f) for (p, _region, f) in PRICES})
-        ),
+        # How this load got its rows: "full" or "incremental" from the export,
+        # and whether it started from the shared snapshot.
+        mode="incremental" if incremental else "full",
+        source=source,
+        fetched=new_rows,
+        full_at=full_at,
+        priced_models=len({(p, f) for (p, _region, f) in PRICES}),
     )
     return INFO
 
@@ -500,3 +978,16 @@ def q(sql: str) -> pd.DataFrame:
 def scalar(sql: str):
     df = q(sql)
     return None if df.empty else df.iloc[0, 0]
+
+
+def export_csv(sql: str) -> Path:
+    """Write a query's full result to a temporary CSV and return its path.
+
+    DuckDB writes the file itself, so a million-row export never has to sit in
+    Python memory as a DataFrame. The caller streams the file and deletes it.
+    """
+    fd, name = tempfile.mkstemp(suffix=".csv")
+    os.close(fd)
+    with _lock:
+        _con.execute(f"COPY ({sql}) TO '{name}' (FORMAT CSV, HEADER)")
+    return Path(name)

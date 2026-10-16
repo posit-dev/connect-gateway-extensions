@@ -5,10 +5,18 @@ Gateway. It shows requests, tokens, and estimated spend, and it groups them by
 user, content, model, and provider.
 
 The dashboard reads the gateway usage export. This export is one Parquet file
-that covers a time window. The app reads it once into a local DuckDB table at
-start. Every chart then queries local data. Press "Refresh data" to read a newer
-window. The export holds metadata only. It never contains the text of a prompt
-or a reply.
+that covers a time window. The app reads it into a local DuckDB table, and
+every chart then queries local data. The export holds metadata only. It never
+contains the text of a prompt or a reply.
+
+Connect builds the export on request, and the time that takes grows with the
+window: 17-30 s for 1.6M records. So the app reads the whole window only once.
+"Refresh data" asks only for the records Connect has written since the last
+load, which takes a few seconds, and the app re-reads the whole window once
+every 24 hours. The table is also saved as a Parquet snapshot in
+`.gateway-cache/`, in the app's working directory. Connect keeps that
+directory until the next deploy and shares it with every process of the app,
+so a restarted process loads the snapshot and fetches only what is new.
 
 ## Configuration
 
@@ -21,21 +29,42 @@ Connect sets both variables for content that it runs, so a deployed copy needs
 no setup. To run the app on your machine, set both variables yourself.
 
 Two optional variables pin the export window. Without them, the window trails
-the clock by 90 days.
+the clock by 30 days.
 
 - `GATEWAY_FROM` — the start of the window, in RFC 3339 UTC, for example
   `2026-09-10T00:00:00Z`.
 - `GATEWAY_TO` — the end of the window, in the same format.
 
+`GATEWAY_CACHE_DIR` moves the snapshot, for example to a shared mount that an
+administrator set up and that outlives deploys.
+
 ## Run locally
 
+The app has one code path and two possible backends. It behaves the same with
+either one; only the server it reads from changes. There is no built-in data
+and no built-in price list, so all usage, prices and content names come from
+the backend.
+
 ```bash
-python -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/shiny run app:app --port 8000
+just setup                               # once: .venv + requirements
+just run-local                           # against the mock Connect (demo/)
+just run <connect-url> <admin-api-key>   # against a real Connect
+just run                                 # same, using CONNECT_SERVER / CONNECT_API_KEY
 ```
 
 Then open http://localhost:8000.
+
+`just run-local` starts `demo/fake_connect.py` on port 3940 and stops it when
+the app exits. The mock serves the same four routes the app reads from Connect:
+
+- the usage export, with synthetic data
+- the price catalog, as a snapshot of a real one in `demo/pricing.json`
+- the price overrides, which are empty
+- the content list
+
+Like Connect, the mock wants an API key on every request. Models the catalog
+does not price cost $0 against either backend; the mock's `gpt-5` traffic is
+one such model.
 
 ## Deploy to Agave
 
@@ -46,7 +75,8 @@ OAuth. rsconnect opens a browser and stores the token:
 rsconnect login https://connect.agave.pwb.posit.it
 ```
 
-Then redeploy new code to the same content item:
+Then redeploy new code to the same content item. To deploy to any other server
+with an API key, run `just deploy <connect-url> <api-key>`.
 
 ```bash
 rsconnect deploy shiny . --server https://connect.agave.pwb.posit.it \
