@@ -1,6 +1,9 @@
 # Development tools, on top of the app's own requirements: `just setup-dev`.
 -r requirements.txt
 
+# Tests: `just test`, configured in pytest.ini.
+pytest==9.1.1
+
 # Type checking: `just typecheck`. The pip package fetches its own Node runtime.
 pyright==1.1.408
 # Type stubs for pandas; without them pyright infers pandas types from its source

@@ -33,9 +33,36 @@ _install file:
 typecheck:
     PYRIGHT_PYTHON_IGNORE_WARNINGS=1 .venv/bin/pyright
 
-# Run the unit tests. They start their own mock Connect server.
-test:
-    {{python}} -m unittest discover -s tests -v
+# Run every test with pytest. The ones marked `connect` start their own fake
+# Connect; pass pytest arguments through, e.g. `just test -k pricing`.
+test *args:
+    {{python}} -m pytest {{args}}
+
+# Only the tests that need no fake Connect server and no running app.
+test-fast *args:
+    {{python}} -m pytest -m "not connect and not app" {{args}}
+
+# Regenerate tests/fixtures/connect_export*.parquet with Connect's own export
+# code (see tests/fixtures/connect_export_fixture_test.go). It runs in a
+# throwaway connect-dev container against a Connect checkout mounted read-only;
+# `go test -overlay` adds the generator to the usagelog package without writing
+# to the checkout. Needs Docker and the checkout's ext/ubuntu22 DuckDB libraries.
+connect-fixtures connect=(env_var("HOME") / "Documents/connect") image="ghcr.io/posit-dev/connect-dev-ubuntu22:latest":
+    docker run --rm \
+        -v "{{connect}}":/connect:ro \
+        -v "{{connect}}/ext/ubuntu22":/connect/ext:ro \
+        -v "{{justfile_directory()}}/tests/fixtures":/fixtures \
+        -v ai-usage-dashboard-gomod:/root/go/pkg/mod \
+        -v ai-usage-dashboard-gobuild:/root/.cache/go-build \
+        -e DASHBOARD_FIXTURE_OUT=/fixtures \
+        -w /connect/src/connect \
+        {{image}} bash -euo pipefail -c ' \
+            lib=/connect/ext/duckdb; \
+            export CGO_CFLAGS="-I$lib"; \
+            export CGO_LDFLAGS="$(for f in $lib/lib*.a; do n=$(basename $f .a); printf -- "-l%s " ${n#lib}; done) -Wl,-Bstatic -lstdc++ -Wl,-Bdynamic -lm -ldl -L$lib"; \
+            echo "{\"Replace\": {\"/connect/src/connect/gateway/usagelog/zz_dashboard_fixture_test.go\": \"/fixtures/connect_export_fixture_test.go\"}}" > /tmp/overlay.json; \
+            go test -tags duckdb_use_static_lib -overlay /tmp/overlay.json \
+                -run TestDashboardFixture -count=1 -v ./gateway/usagelog/'
 
 # Run the app against a real Connect server: `just run <url> <api-key>`, or
 # `just run` to use CONNECT_SERVER and CONNECT_API_KEY from the environment.
@@ -68,6 +95,7 @@ deploy server=env_var_or_default("CONNECT_SERVER", "") key=env_var_or_default("C
         --exclude '.venv/*' --exclude 'demo/*' --exclude '__pycache__/*' \
         --exclude 'rsconnect-python/*' --exclude 'justfile' \
         --exclude 'dev-requirements.txt' --exclude 'pyrightconfig.json' \
+        --exclude 'pytest.ini' --exclude 'tests/*' \
         --exclude '.gateway-cache/*'
 
 # The one way the app starts. Do not add mode-specific settings here.

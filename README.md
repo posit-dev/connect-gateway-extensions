@@ -70,12 +70,26 @@ one such model.
 
 ```bash
 just setup-dev    # once: .venv + requirements + dev-requirements.txt
-just test         # unit tests; they start their own mock Connect
+just test         # every test (pytest); some start their own mock Connect
+just test-fast    # only the tests that need no server, in about a second
 just typecheck    # pyright, configured in pyrightconfig.json
 ```
 
-`dev-requirements.txt` adds pyright, the pandas type stubs, and `websockets`
-for the session smoke test. Neither it nor `pyrightconfig.json` is deployed.
+The tests give real inputs to real code rather than mocking it: usage exports
+that Connect's own export code built (`tests/fixtures/`), small Parquet exports
+written by the test with the same schema (see `tests/conftest.py`), private
+DuckDB connections, and `demo/fake_connect.py` for anything that talks to
+Connect. A test checks that the fake serves exactly Connect's export schema.
+
+To rebuild the Connect exports after Connect's export changes, run
+`just connect-fixtures [path-to-connect-checkout]`. It runs the generator in
+`tests/fixtures/connect_export_fixture_test.go` inside a throwaway connect-dev
+container, with the checkout mounted read-only.
+Importing `usage` does nothing; `app.py` runs the first `usage.load()`.
+
+`dev-requirements.txt` adds pytest, pyright, the pandas type stubs, and
+`websockets` for the session smoke test. None of it, `pytest.ini`,
+`pyrightconfig.json` or `tests/` is deployed.
 
 ## Architecture
 

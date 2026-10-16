@@ -112,20 +112,27 @@ def rate_sql() -> dict[str, str]:
     global _RATES_CACHE
     prices = _prices()
     if _RATES_CACHE[0] is not prices:
-        _RATES_CACHE = (
-            prices,
-            {
-                p: _build_case(prices, lambda *r, k=k: f"{float(r[k])}")
-                for k, p in enumerate(RATE_PARTS)
-            },
-        )
+        _RATES_CACHE = (prices, _build_rate_parts(prices))
     return _RATES_CACHE[1]
+
+
+def _build_rate_parts(prices: dict) -> dict[str, str]:
+    """rate_sql for one price catalog, uncached."""
+    return {
+        p: _build_case(prices, lambda *r, k=k: f"{float(r[k])}")
+        for k, p in enumerate(RATE_PARTS)
+    }
 
 
 def model_rates(model: str) -> tuple | None:
     """(input, output, cache write, cache read) in USD per token for a model's
     base list rate, Anthropic's first, or None when the catalog has no price."""
-    hits = {p: r for (p, region, m), r in _prices().items() if m == model and not region}
+    return _model_rates(_prices(), model)
+
+
+def _model_rates(prices: dict, model: str) -> tuple | None:
+    """model_rates for one price catalog."""
+    hits = {p: r for (p, region, m), r in prices.items() if m == model and not region}
     rates = hits.get("anthropic") or next(iter(hits.values()), None)
     return tuple(v / 1e6 for v in rates) if rates else None
 

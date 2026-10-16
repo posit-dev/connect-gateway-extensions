@@ -13,6 +13,12 @@ is the data, not the code path:
     GET /__api__/v1/groups                        teams plus cross-cutting groups
     GET /__api__/v1/groups/<guid>/members         (users can be in several)
 
+For the failure tests, POST /__fault__?route=<route>&mode=<mode> makes one route
+misbehave until POST /__fault__?reset=1. Routes are export, pricing, overrides,
+content, groups and members. Modes: status:<code> (a plain-text refusal),
+html:<code> (an HTML error page, as a proxy sends), garbage (200 with a body
+that is not Parquet or JSON) and truncate (a body cut off mid-download).
+
 Like Connect, every route wants `Authorization: Key <anything>`, and the export
 wants from, to and as_of. Refresh demo/pricing.json from a real server with:
 
@@ -45,6 +51,11 @@ DAYS = 30  # the dashboard loads 30 days, so generate exactly that
 
 # Enough rows that the Overview's 2,000-row table cap is visibly a cap.
 ROWS = int(os.environ.get("FAKE_ROWS", 160000))
+
+# The most rows one page of a paged list holds, whatever page_size asks for.
+# Connect caps page_size too; the tests set a small cap so that reading groups
+# and their members has to follow several pages.
+PAGE_CAP = int(os.environ.get("MOCK_PAGE_CAP", 500))
 
 _HEAVY = [
     ("ada", "lovelace"), ("alan", "turing"), ("grace", "hopper"),
@@ -314,10 +325,51 @@ def pick_client(from_content: bool) -> tuple[str | None, str | None]:
     return None, None
 
 
+# The columns of Connect's usage export and their types, in order: the record
+# columns, the derived origin, and the date/node partition columns (see
+# connect/gateway/usagelog/export.go). tests/test_connect_export.py checks this
+# against an export Connect itself built.
+EXPORT_COLUMNS = {
+    "start_time": "TIMESTAMPTZ", "ingest_time": "TIMESTAMPTZ", "node_name": "VARCHAR",
+    "duration_ms": "BIGINT", "provider": "VARCHAR", "operation": "VARCHAR",
+    "integration_guid": "VARCHAR", "integration_type": "VARCHAR",
+    "integration_auth_type": "VARCHAR", "content_guid": "VARCHAR", "content_id": "BIGINT",
+    "job_key": "VARCHAR", "authenticated_user_guid": "VARCHAR",
+    "authenticated_username": "VARCHAR", "authenticated_email": "VARCHAR",
+    "content_owner_guid": "VARCHAR", "content_owner_username": "VARCHAR",
+    "content_owner_email": "VARCHAR", "viewer_user_guid": "VARCHAR",
+    "viewer_username": "VARCHAR", "viewer_email": "VARCHAR", "conversation_id": "VARCHAR",
+    "user_agent": "VARCHAR", "request_metadata": "JSON", "server_address": "VARCHAR",
+    "server_port": "BIGINT", "status_code": "BIGINT", "request_model": "VARCHAR",
+    "response_model": "VARCHAR", "response_id": "VARCHAR", "request_max_tokens": "BIGINT",
+    "request_temperature": "DOUBLE", "request_top_p": "DOUBLE",
+    "request_stop_sequences": "VARCHAR[]", "finish_reasons": "VARCHAR[]",
+    "input_tokens": "BIGINT", "output_tokens": "BIGINT",
+    "cache_creation_input_tokens": "BIGINT", "cache_read_input_tokens": "BIGINT",
+    "origin": "VARCHAR", "date": "VARCHAR", "node": "VARCHAR",
+}
+
+
 def build_parquet() -> bytes:
+    """The rows as Connect would export them: its columns, types and order.
+
+    A column the fake does not generate is NULL. The partition columns come
+    from where Connect files a record: its ingest day and its node.
+    """
     df = make_rows()
+    derived = {
+        "date": "strftime(ingest_time AT TIME ZONE 'UTC', '%Y-%m-%d')",
+        "node": "node_name",
+    }
+    cols = ", ".join(
+        f'CAST({derived.get(c, c)} AS {t}) AS "{c}"' if c in df.columns or c in derived
+        else f'NULL::{t} AS "{c}"'
+        for c, t in EXPORT_COLUMNS.items()
+    )
     path = Path(tempfile.mkdtemp()) / "export.parquet"
-    duckdb.sql(f"COPY (SELECT * FROM df) TO '{path}' (FORMAT parquet)")
+    duckdb.sql(
+        f"COPY (SELECT {cols} FROM df) TO '{path}' (FORMAT parquet, COMPRESSION zstd)"
+    )
     return path.read_bytes()
 
 
@@ -352,15 +404,29 @@ def group_members() -> dict[str, list[int]]:
 MEMBERS = group_members()
 
 
-def groups_list() -> bytes:
+def paged(items: list, query: str) -> bytes:
+    """One page of a Connect list: results, current_page and total.
+
+    page_size is capped at PAGE_CAP, as Connect caps it, so a client must use
+    total rather than assume a short page is the last one.
+    """
+    params = parse_qs(query)
+    size = min(int(params.get("page_size", ["20"])[0]), PAGE_CAP)
+    page = int(params.get("page_number", ["1"])[0])
     return json.dumps({
-        "results": [{"guid": g, "name": n, "owner_guid": None} for n, g in GROUPS.items()],
-        "current_page": 1,
-        "total": len(GROUPS),
+        "results": items[(page - 1) * size:page * size],
+        "current_page": page,
+        "total": len(items),
     }).encode()
 
 
-def group_members_json(guid: str) -> bytes | None:
+def groups_list(query: str) -> bytes:
+    return paged(
+        [{"guid": g, "name": n, "owner_guid": None} for n, g in GROUPS.items()], query
+    )
+
+
+def group_members_json(guid: str, query: str) -> bytes | None:
     name = next((n for n, g in GROUPS.items() if g == guid), None)
     if name is None:
         return None
@@ -368,7 +434,7 @@ def group_members_json(guid: str) -> bytes | None:
         {"guid": USERS[i][2], "username": USERS[i][0], "email": USERS[i][1]}
         for i in MEMBERS[name]
     ]
-    return json.dumps({"results": users, "current_page": 1, "total": len(users)}).encode()
+    return paged(users, query)
 
 
 def content_list() -> bytes:
@@ -385,8 +451,54 @@ OVERRIDES = json.dumps({"overrides": []}).encode()
 EXPORT = "/__api__/v1/system/gateway/usage/export"
 
 
+ROUTES = {
+    EXPORT: "export",
+    "/__api__/v1/system/gateway/pricing": "pricing",
+    "/__api__/v1/system/gateway/models": "overrides",
+    "/__api__/v1/content": "content",
+    "/__api__/v1/groups": "groups",
+}
+
+
 class Handler(BaseHTTPRequestHandler):
     payload = b""
+    faults: dict[str, str] = {}
+
+    def _fault(self, mode: str) -> None:
+        kind, _, arg = mode.partition(":")
+        if kind in ("status", "html"):
+            code = int(arg)
+            if kind == "status":
+                body, ctype = f"injected {code}".encode(), "text/plain"
+            else:
+                body = (f"<html>\n<head><title>{code} Error</title></head>\n<body>\n"
+                        f"<h1>Bad gateway</h1>\n{'<p>proxy said no</p>' * 40}\n"
+                        "</body></html>").encode()
+                ctype = "text/html"
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif kind == "garbage":
+            self._send(b"<html>this is not parquet</html>", "text/html")
+        elif kind == "truncate":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(self.payload)))
+            self.end_headers()
+            self.wfile.write(self.payload[:1000])
+            self.close_connection = True
+        else:
+            self.send_error(500, f"unknown fault {mode}")
+
+    def _control(self, query: str) -> None:
+        params = parse_qs(query)
+        if "reset" in params:
+            self.faults.clear()
+        else:
+            self.faults[params["route"][0]] = params["mode"][0]
+        self._send(b"ok", "text/plain")
 
     def _authorized(self) -> bool:
         """Connect answers a missing or malformed key with 401; so does this."""
@@ -408,6 +520,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         path, _, query = self.path.partition("?")
+        key = ROUTES.get(path) or (
+            "members" if path.startswith("/__api__/v1/groups/") and path.endswith("/members")
+            else None)
+        if key in self.faults:
+            self._fault(self.faults[key])
+            return
         if path == EXPORT:
             params = parse_qs(query)
             missing = [p for p in ("from", "to", "as_of") if p not in params]
@@ -422,9 +540,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/__api__/v1/content":
             self._send(content_list(), "application/json", head)
         elif path == "/__api__/v1/groups":
-            self._send(groups_list(), "application/json", head)
+            self._send(groups_list(query), "application/json", head)
         elif path.startswith("/__api__/v1/groups/") and path.endswith("/members"):
-            body = group_members_json(path.split("/")[4])
+            body = group_members_json(path.split("/")[4], query)
             if body is None:
                 self.send_error(404)
             else:
@@ -434,6 +552,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         self._route(head=False)
+
+    def do_POST(self):  # noqa: N802
+        path, _, query = self.path.partition("?")
+        if path == "/__fault__":
+            self._control(query)
+        else:
+            self.send_error(404)
 
     def do_HEAD(self):  # noqa: N802
         self._route(head=True)

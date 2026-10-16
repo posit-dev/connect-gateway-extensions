@@ -42,6 +42,7 @@ app's working directory so a restarted process can reuse its existing rows.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.client
 import json
@@ -61,8 +62,6 @@ from typing import Any, Iterable
 import duckdb
 import pandas as pd
 
-CONNECT_SERVER = os.environ.get("CONNECT_SERVER") or ""
-CONNECT_API_KEY = os.environ.get("CONNECT_API_KEY")
 EXPORT_PATH = "__api__/v1/system/gateway/usage/export"
 LOOKBACK_DAYS = 30
 
@@ -74,30 +73,65 @@ EXPORT_TIMEOUT = 300
 # minute; two absorbs the skew between this process and Connect.
 AS_OF_LAG = timedelta(minutes=2)
 
-if not CONNECT_SERVER:
-    raise RuntimeError(
-        "CONNECT_SERVER is not set. Connect sets it for deployed content; "
-        "set it yourself to run locally, e.g. http://localhost:3939"
-    )
-if not CONNECT_API_KEY:
-    raise RuntimeError(
-        "CONNECT_API_KEY is not set. Connect sets it for deployed content; "
-        "the export needs an administrator key"
-    )
 
-_EXPORT_ENDPOINT = f"{CONNECT_SERVER.rstrip('/')}/{EXPORT_PATH}"
+# Configuration is read from the environment when it is used, not at import,
+# so importing this module has no side effects: no network, no env checks. The
+# app calls load() itself (see app.py), and tests import the helpers without a
+# Connect server.
+def connect_server() -> str:
+    """CONNECT_SERVER without a trailing slash, or "" when it is unset."""
+    return (os.environ.get("CONNECT_SERVER") or "").rstrip("/")
+
+
+def _api_key() -> str | None:
+    return os.environ.get("CONNECT_API_KEY")
+
+
+def _check_config() -> None:
+    """Refuse to load without the two variables Connect sets for its content."""
+    if not connect_server():
+        raise RuntimeError(
+            "CONNECT_SERVER is not set. Connect sets it for deployed content; "
+            "set it yourself to run locally, e.g. http://localhost:3939"
+        )
+    if not _api_key():
+        raise RuntimeError(
+            "CONNECT_API_KEY is not set. Connect sets it for deployed content; "
+            "the export needs an administrator key"
+        )
+
+
+def _export_endpoint() -> str:
+    return f"{connect_server()}/{EXPORT_PATH}"
+
+
 # The gateway pricing endpoints share the export's base. `pricing` is the
 # vendored litellm default catalog; `models` is the admin override table.
-_GATEWAY_BASE = f"{CONNECT_SERVER.rstrip('/')}/__api__/v1/system/gateway"
-_API_BASE = f"{CONNECT_SERVER.rstrip('/')}/__api__/v1"
+def _gateway_base() -> str:
+    return f"{connect_server()}/__api__/v1/system/gateway"
+
+
+def _api_base() -> str:
+    return f"{connect_server()}/__api__/v1"
+
 _RFC3339 = "%Y-%m-%dT%H:%M:%SZ"
 
+def new_connection() -> duckdb.DuckDBPyConnection:
+    """An in-memory DuckDB connection set up the way the app's own is.
+
+    The export carries TIMESTAMPTZ. Pin the session to UTC, or every cast to
+    TIMESTAMP below shifts by the server's local offset and the "UTC" the
+    charts claim is not the UTC they show.
+    """
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    return con
+
+
 _lock = threading.Lock()
-_con = duckdb.connect()
-# The export carries TIMESTAMPTZ. Pin the session to UTC, or every cast to
-# TIMESTAMP below shifts by the server's local offset and the "UTC" the charts
-# claim is not the UTC they show.
-_con.execute("SET TimeZone='UTC'")
+# The app's connection. The ingest functions below take another one, which is
+# how tests shape and merge exports without touching the loaded data.
+_con = new_connection()
 
 # Set by load(): when the table was read, the window it covers, and its size.
 INFO: dict = {}
@@ -147,7 +181,7 @@ def _get_json(url: str):
     req = urllib.request.Request(
         url,
         method="GET",
-        headers={"Authorization": f"Key {CONNECT_API_KEY}", "Accept": "application/json"},
+        headers={"Authorization": f"Key {_api_key()}", "Accept": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
@@ -156,17 +190,19 @@ def _get_json(url: str):
         return None
 
 
-def _list_pages(url: str, page_size: int = 100) -> list | None:
+def _list_pages(url: str, page_size: int = 100, get=None) -> list | None:
     """Read a whole Connect list, or fail without returning a partial list.
 
     Some endpoints return bare arrays; others include results and total. Use
     total when supplied, since the server may cap the requested page size.
+    `get` fetches one page URL as JSON (default _get_json); tests pass a fake.
     """
+    get = get or _get_json
     items: list = []
     previous: list | None = None
     page = 1
     while True:
-        body = _get_json(f"{url}?page_size={page_size}&page_number={page}")
+        body = get(f"{url}?page_size={page_size}&page_number={page}")
         rows = _results(body)
         if rows is None or (previous is not None and rows == previous and rows):
             return None  # failed page, or a server ignoring page_number
@@ -192,7 +228,7 @@ def _fetch_content_names() -> dict[str, str] | None:
     An unexpected shape also returns None, so one bad refresh keeps the last
     good names instead of dropping every label back to a guid.
     """
-    items = _list_pages(f"{_API_BASE}/content")
+    items = _list_pages(f"{_api_base()}/content")
     if items is None:
         return None
     names: dict[str, str] = {}
@@ -220,14 +256,14 @@ def _fetch_groups() -> list[tuple[str, str, str]] | None:
     The group list and each group's members are paged. A partial response is
     unusable for group totals, so leave the previous membership table intact.
     """
-    groups = _list_pages(f"{_API_BASE}/groups")
+    groups = _list_pages(f"{_api_base()}/groups")
     if groups is None:
         return None
     out = []
     for g in groups:
         if not isinstance(g, dict) or not g.get("guid"):
             continue
-        members = _list_pages(f"{_API_BASE}/groups/{g['guid']}/members")
+        members = _list_pages(f"{_api_base()}/groups/{g['guid']}/members")
         if members is None:
             return None
         for m in members:
@@ -331,12 +367,12 @@ def _fetch_prices() -> dict | None:
     None: a non-numeric rate, a renamed or missing field, or a list where an
     object was expected. The caller decides what a missing catalog means.
     """
-    pricing = _get_json(f"{_GATEWAY_BASE}/pricing")
+    pricing = _get_json(f"{_gateway_base()}/pricing")
     if not pricing:
         return None
     try:
         prices = _catalog_prices(pricing)
-        overrides = _get_json(f"{_GATEWAY_BASE}/models")
+        overrides = _get_json(f"{_gateway_base()}/models")
         if overrides:
             for row in overrides.get("overrides", []):
                 provider, model, rates = row.get("provider"), row.get("model"), _rates(row)
@@ -348,7 +384,7 @@ def _fetch_prices() -> dict | None:
     return prices or None
 
 
-def _window() -> tuple[str, str, str]:
+def _window(now: datetime | None = None) -> tuple[str, str, str]:
     """The export window and its watermark, as RFC 3339 strings.
 
     GATEWAY_FROM and GATEWAY_TO pin the window; without them it trails the
@@ -361,7 +397,7 @@ def _window() -> tuple[str, str, str]:
     export anyway: as_of bounds ingest_time, and a call starts before it is
     ingested.
     """
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
     as_of = (now - AS_OF_LAG).replace(second=0, microsecond=0)
     return (
         os.environ.get("GATEWAY_FROM")
@@ -582,7 +618,7 @@ def _download(url: str) -> Path:
     the error message quotes.
     """
     req = urllib.request.Request(
-        url, method="GET", headers={"Authorization": f"Key {CONNECT_API_KEY}"}
+        url, method="GET", headers={"Authorization": f"Key {_api_key()}"}
     )
     fd, name = tempfile.mkstemp(suffix=".parquet")
     path = Path(name)
@@ -590,8 +626,15 @@ def _download(url: str) -> Path:
         with os.fdopen(fd, "wb") as out, urllib.request.urlopen(
             req, timeout=EXPORT_TIMEOUT
         ) as r:
+            received = 0
             while chunk := r.read(1 << 20):
                 out.write(chunk)
+                received += len(chunk)
+            # read(n) returns what arrived when the connection drops instead of
+            # raising, so a cut-off body would pass for a whole file.
+            expected = r.headers.get("Content-Length")
+            if expected is not None and expected.isdigit() and received < int(expected):
+                raise http.client.IncompleteRead(b"", int(expected) - received)
     except urllib.error.HTTPError as err:
         path.unlink(missing_ok=True)
         # Connect answers in plain text; a proxy in front of it may send an
@@ -616,10 +659,13 @@ def _download(url: str) -> Path:
 _EPOCH = "1970-01-01T00:00:00Z"
 
 
-def _shape_into(target: str, path: Path, window_from: str, window_to: str, cutoff: str) -> None:
+def _shape_into(
+    con: duckdb.DuckDBPyConnection,
+    target: str, path: Path, window_from: str, window_to: str, cutoff: str,
+) -> None:
     """Run _SHAPE over one downloaded export into `target` (a CREATE ... AS).
 
-    The caller holds _lock.
+    The caller holds _lock when `con` is the app's connection.
     """
     args = [str(path), window_from, window_to, cutoff]
     # A Connect server that predates a column has none of it in its export.
@@ -642,33 +688,46 @@ def _shape_into(target: str, path: Path, window_from: str, window_to: str, cutof
         for key, val in subs.items():
             sql = sql.replace(key, val)
         try:
-            _con.execute(target + sql, args)
+            con.execute(target + sql, args)
             return
         except duckdb.BinderException as e:
-            cols = ("user_agent", "origin") if i == 0 else ("request_metadata",)
+            # Move on when the missing column is one a later step fills in. The
+            # binder names the first missing column in SELECT order, which is
+            # request_metadata when an export lacks all three.
+            cols = ("user_agent", "origin", "request_metadata") if i == 0 else ("request_metadata",)
             if i == len(steps) - 1 or not any(c in str(e) for c in cols):
                 raise
 
 
-def _count(table: str) -> int:
+def _count(table: str, con: duckdb.DuckDBPyConnection | None = None) -> int:
     """Rows in a table. The caller holds _lock."""
-    row = _con.sql(f"SELECT COUNT(*) FROM {table}").fetchone()
+    row = (con or _con).sql(f"SELECT COUNT(*) FROM {table}").fetchone()
     assert row is not None  # COUNT(*) always returns one row
     return row[0]
 
 
-def _read_export(path: Path, window_from: str, window_to: str) -> int:
-    """Replace gateway_events with one downloaded export; return its row count."""
+def _read_export(
+    path: Path, window_from: str, window_to: str,
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> int:
+    """Replace gateway_events with one downloaded export; return its row count.
+
+    `con` defaults to the app's connection.
+    """
+    con = con or _con
     with _lock:
         # The epoch as the ingest cutoff: a full load keeps every row.
         _shape_into(
-            "CREATE OR REPLACE TABLE gateway_events AS ",
+            con, "CREATE OR REPLACE TABLE gateway_events AS ",
             path, window_from, window_to, _EPOCH,
         )
-        return _count("gateway_events")
+        return _count("gateway_events", con)
 
 
-def _merge_export(path: Path, window_from: str, window_to: str, cutoff: str) -> int:
+def _merge_export(
+    path: Path, window_from: str, window_to: str, cutoff: str,
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> int:
     """Merge an incremental export into gateway_events; return the rows it added.
 
     The export covers every record ingested at or after `cutoff`. The local
@@ -677,27 +736,29 @@ def _merge_export(path: Path, window_from: str, window_to: str, cutoff: str) -> 
     cutoff falls in. A record that was in flight at the last load, or that
     reached disk late, sits above the cutoff and is simply read again. Rows
     that have aged out of the trailing window are dropped in the same step.
+    `con` defaults to the app's connection.
     """
+    con = con or _con
     with _lock:
         _shape_into(
-            "CREATE OR REPLACE TEMP TABLE gateway_delta AS ",
+            con, "CREATE OR REPLACE TEMP TABLE gateway_delta AS ",
             path, window_from, window_to, cutoff,
         )
         try:
-            _con.execute("BEGIN TRANSACTION")
-            _con.execute(
+            con.execute("BEGIN TRANSACTION")
+            con.execute(
                 """DELETE FROM gateway_events
                    WHERE ingest_time >= ?::TIMESTAMPTZ
                       OR ts < ?::TIMESTAMPTZ::TIMESTAMP""",
                 [cutoff, window_from],
             )
-            _con.execute("INSERT INTO gateway_events BY NAME SELECT * FROM gateway_delta")
-            _con.execute("COMMIT")
+            con.execute("INSERT INTO gateway_events BY NAME SELECT * FROM gateway_delta")
+            con.execute("COMMIT")
         except BaseException:
-            _con.execute("ROLLBACK")
+            con.execute("ROLLBACK")
             raise
-        added = _count("gateway_delta")
-        _con.execute("DROP TABLE gateway_delta")
+        added = _count("gateway_delta", con)
+        con.execute("DROP TABLE gateway_delta")
         return added
 
 
@@ -729,15 +790,19 @@ FULL_RELOAD_EVERY = timedelta(hours=24)
 #                             (EarlyAccess.PersistentDataDirectories), which
 #                             survives deploys and restarts, off-host included
 #   the working directory     kept until the next deploy, shared by processes
-CACHE_DIR = Path(
-    os.environ.get("GATEWAY_CACHE_DIR")
-    or (
-        Path(os.environ["CONNECT_CONTENT_DATA_DIR"]) / "gateway-cache"
-        if os.environ.get("CONNECT_CONTENT_DATA_DIR")
-        else Path(__file__).parent / ".gateway-cache"
+def cache_dir() -> Path:
+    return Path(
+        os.environ.get("GATEWAY_CACHE_DIR")
+        or (
+            Path(os.environ["CONNECT_CONTENT_DATA_DIR"]) / "gateway-cache"
+            if os.environ.get("CONNECT_CONTENT_DATA_DIR")
+            else Path(__file__).parent / ".gateway-cache"
+        )
     )
-)
-SNAPSHOT = CACHE_DIR / "gateway_events.parquet"
+
+
+def snapshot_path() -> Path:
+    return cache_dir() / "gateway_events.parquet"
 
 # What gateway_events holds: the watermark it was read up to, and when it was
 # last read in full. None until the first load.
@@ -762,7 +827,7 @@ def _settings() -> str:
         [
             hashlib.sha256(_SHAPE.encode()).hexdigest()[:16],
             "full-window-delta-v2",  # invalidate snapshots from partition-limited merges
-            CONNECT_SERVER,
+            connect_server(),
             LOOKBACK_DAYS,
             os.environ.get("GATEWAY_FROM"),
             os.environ.get("GATEWAY_TO"),
@@ -774,7 +839,12 @@ def _sql_path(p: Path) -> str:
     return "'" + str(p).replace("'", "''") + "'"
 
 
-def _read_snapshot(window_from: str) -> dict | None:
+def _read_snapshot(
+    window_from: str, *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    path: Path | None = None,
+    now: datetime | None = None,
+) -> dict | None:
     """Load the shared snapshot into gateway_events, if it is worth using.
 
     Returns its state, or None when there is none, it was built with other
@@ -785,18 +855,24 @@ def _read_snapshot(window_from: str) -> dict | None:
     Parquet file more than once (footer, then row groups). Reading through a
     private hard link pins one version: the rename replaces the name, never
     the file the link points at.
+
+    `con`, `path` and `now` default to the app's connection, snapshot_path()
+    and the clock.
     """
-    if not SNAPSHOT.exists():
+    con = con or _con
+    snapshot = path or snapshot_path()
+    now = now or datetime.now(timezone.utc)
+    if not snapshot.exists():
         return None
-    pinned = CACHE_DIR / f".read-{os.getpid()}-{uuid.uuid4().hex}.parquet"
+    pinned = snapshot.parent / f".read-{os.getpid()}-{uuid.uuid4().hex}.parquet"
     try:
         try:
-            os.link(SNAPSHOT, pinned)
+            os.link(snapshot, pinned)
         except OSError:
-            shutil.copyfile(SNAPSHOT, pinned)  # a filesystem without hard links
+            shutil.copyfile(snapshot, pinned)  # a filesystem without hard links
         with _lock:
             meta = dict(
-                _con.sql(
+                con.sql(
                     "SELECT decode(key), decode(value) FROM "
                     f"parquet_kv_metadata({_sql_path(pinned)})"
                 ).fetchall()
@@ -804,12 +880,12 @@ def _read_snapshot(window_from: str) -> dict | None:
             state = {"as_of": _parse(meta["as_of"]), "full_at": _parse(meta["full_at"])}
             stale = (
                 meta.get("settings") != _settings()
-                or datetime.now(timezone.utc) - state["full_at"] >= FULL_RELOAD_EVERY
+                or now - state["full_at"] >= FULL_RELOAD_EVERY
                 or state["as_of"] - REFETCH_MARGIN < _parse(window_from)
             )
             if stale:
                 return None
-            _con.execute(
+            con.execute(
                 "CREATE OR REPLACE TABLE gateway_events AS "
                 f"SELECT * FROM read_parquet({_sql_path(pinned)})"
             )
@@ -820,7 +896,11 @@ def _read_snapshot(window_from: str) -> dict | None:
         pinned.unlink(missing_ok=True)
 
 
-def _write_snapshot(state: dict) -> None:
+def _write_snapshot(
+    state: dict, *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    path: Path | None = None,
+) -> None:
     """Save gateway_events for the next process, atomically.
 
     Written to a private name and renamed over the snapshot, so a reader sees
@@ -828,9 +908,13 @@ def _write_snapshot(state: dict) -> None:
     write simply leave the later. It runs on its own DuckDB connection, so the
     dashboard's queries are not held behind it. Failing to save costs the next
     process a full load and nothing else, so failures are swallowed.
+
+    `con` and `path` default to the app's connection and snapshot_path().
     """
+    con = con or _con
     with _load_lock:
-        tmp = CACHE_DIR / f".write-{os.getpid()}-{uuid.uuid4().hex}.parquet"
+        snapshot = path or snapshot_path()
+        tmp = snapshot.parent / f".write-{os.getpid()}-{uuid.uuid4().hex}.parquet"
         kv = {
             "as_of": state["as_of"].strftime(_RFC3339),
             "full_at": state["full_at"].strftime(_RFC3339),
@@ -840,8 +924,8 @@ def _write_snapshot(state: dict) -> None:
             f"{k}: '{v.replace(chr(39), chr(39) * 2)}'" for k, v in kv.items()
         )
         try:
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            cur = _con.cursor()
+            snapshot.parent.mkdir(parents=True, exist_ok=True)
+            cur = con.cursor()
             try:
                 cur.execute(
                     f"COPY gateway_events TO {_sql_path(tmp)} "
@@ -849,14 +933,17 @@ def _write_snapshot(state: dict) -> None:
                 )
             finally:
                 cur.close()
-            os.replace(tmp, SNAPSHOT)
+            os.replace(tmp, snapshot)
         except (OSError, duckdb.Error):
-            tmp.unlink(missing_ok=True)
+            # The cleanup can fail the same way (say, the cache path is a
+            # file), and that must not escape either.
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
 
 
 def _export_url(window_from: str, window_to: str, as_of: str) -> str:
     return (
-        f"{_EXPORT_ENDPOINT}?from={window_from}&to={window_to}"
+        f"{_export_endpoint()}?from={window_from}&to={window_to}"
         f"&as_of={as_of}&format=parquet"
     )
 
@@ -884,42 +971,59 @@ _pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="usage-load")
 def load() -> dict:
     """Bring gateway_events up to date, and report what was loaded.
 
-    Called at import and again for every refresh. The first load in a process
+    Called once at app startup (app.py) and again for every refresh. It
+    raises before any request when CONNECT_SERVER or CONNECT_API_KEY is
+    unset. The first load in a process
     starts from the shared snapshot when there is a usable one; after that,
     each load merges recently ingested rows from a full-window export, with
     a complete local rebuild every FULL_RELOAD_EVERY. A failure leaves the data
     already loaded in place. The query lock is held only while DuckDB reads
     the downloaded file, not during the download.
     """
+    _check_config()
     with _load_lock:
         return _load()
 
 
-def _load() -> dict:
-    global _state
-    window_from, window_to, as_of = _window()
-    prices_f = _pool.submit(_fetch_prices)
-    names_f = _pool.submit(_fetch_content_names)
-    groups_f = _pool.submit(_fetch_groups)
+def _plan(
+    prev: dict | None, now: datetime, window_from: str, as_of: str,
+) -> tuple[bool, str]:
+    """Whether to merge into the loaded table or rebuild it, and the watermark.
 
-    source = "export"
-    if _state is None:
-        _state = _read_snapshot(window_from)
-        if _state is not None:
-            source = "snapshot"
-
-    now = datetime.now(timezone.utc)
-    prev = _state
+    Incremental needs a loaded state, one full read within FULL_RELOAD_EVERY,
+    and a window start still covered by the watermark minus REFETCH_MARGIN.
+    The watermark never moves backwards: a snapshot written by another process
+    (another node, in HA) can be a little ahead of this clock, and from > to is
+    a request Connect refuses.
+    """
     incremental = (
         prev is not None
         and now - prev["full_at"] < FULL_RELOAD_EVERY
         and prev["as_of"] - REFETCH_MARGIN >= _parse(window_from)
     )
     if prev is not None and incremental:
-        # Never move the watermark backwards. A snapshot written by another
-        # process (another node, in HA) can be a little ahead of this clock,
-        # and from > to is a request Connect refuses.
         as_of = max(as_of, prev["as_of"].strftime(_RFC3339))
+    return incremental, as_of
+
+
+def _load(now: datetime | None = None) -> dict:
+    """One load, as of `now` (the clock by default)."""
+    global _state
+    now = now or datetime.now(timezone.utc)
+    window_from, window_to, as_of = _window(now)
+    prices_f = _pool.submit(_fetch_prices)
+    names_f = _pool.submit(_fetch_content_names)
+    groups_f = _pool.submit(_fetch_groups)
+
+    source = "export"
+    if _state is None:
+        _state = _read_snapshot(window_from, now=now)
+        if _state is not None:
+            source = "snapshot"
+
+    prev = _state
+    incremental, as_of = _plan(prev, now, window_from, as_of)
+    if prev is not None and incremental:
         cutoff = (prev["as_of"] - REFETCH_MARGIN).strftime(_RFC3339)
         # Connect selects start-time partitions, not ingest-time partitions.
         # Always export the full start-time window: otherwise deleting rows
@@ -948,7 +1052,7 @@ def _load() -> dict:
         PRICES = fetched
     elif PRICES is None:
         raise RuntimeError(
-            f"cannot read the gateway price catalog at {_GATEWAY_BASE}/pricing -- "
+            f"cannot read the gateway price catalog at {_gateway_base()}/pricing -- "
             "check that this Connect server serves it and that CONNECT_API_KEY "
             "may read it"
         )
@@ -998,9 +1102,6 @@ def _load() -> dict:
         priced_models=len({(p, f) for (p, _region, f) in PRICES}),
     )
     return INFO
-
-
-load()
 
 
 def q(sql: str) -> pd.DataFrame:

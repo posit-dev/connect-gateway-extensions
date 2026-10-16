@@ -155,6 +155,9 @@ def meta_choices() -> dict[str, str]:
     return out
 
 
+# The first load runs here, when the app is imported, because the UI below is
+# built from what was loaded. usage itself has no import side effects.
+usage.load()
 CATALOG = catalog()  # seeds the input choices; the server tracks it reactively
 
 

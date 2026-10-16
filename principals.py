@@ -535,7 +535,7 @@ def server(input, ctx: PageContext, records_sql):
             facts.append(("Connect groups", chips(info["groups"]) or "none found"))
         elif e.kind == "content":
             sub = e.key
-            link = f"{usage.CONNECT_SERVER.rstrip('/')}/connect/#/apps/{e.key}"
+            link = f"{usage.connect_server()}/connect/#/apps/{e.key}"
             facts += [
                 ("owner", info["owner"] or "unknown"),
                 ("auth", info["auth"] or "unknown"),
