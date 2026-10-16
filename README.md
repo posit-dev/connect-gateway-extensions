@@ -66,6 +66,44 @@ Like Connect, the mock wants an API key on every request. Models the catalog
 does not price cost $0 against either backend; the mock's `gpt-5` traffic is
 one such model.
 
+## Architecture
+
+`app:app` is the entrypoint. `app.py` is the shell and the wiring. It builds
+the page frame and the filter drawer, keeps the state that every page shares,
+and starts each page's server. The shared state is the loaded-data catalog, the
+filter dict `flt()`, the data refresh, bookmarks and URL query state, the
+topbar, the unpriced-model checks, and the CSV export registration. It also
+defines the page order.
+
+Each page lives in its own module and exposes `panel()`, its `nav_panel`, and
+`server(input, ctx)`:
+
+- `pages/overview.py`, `pages/attribution.py`, `pages/conversations.py`,
+  `pages/adoption.py`, `pages/models.py` and `pages/raw_data.py`.
+- `principals.py` is the Principals page. It takes Raw Data's SQL builder and
+  returns `open_profile`, which Attribution uses to open a pick on Principals.
+
+`pages/context.py` defines `PageContext`, the explicit set of shared services a
+page server receives in place of importing `app.py`: `flt`, `cat`, `where`,
+`est_cost`, `register_export`, `total_bars`, `formatted` and the rest.
+
+The helper modules hold no Shiny session state:
+
+- `usage.py` loads the export into DuckDB and reads Connect's price catalog
+  and content list.
+- `pricing.py` builds the spend SQL from the price catalog and rebuilds it
+  after a refresh.
+- `filters.py` turns the filter dict into a SQL `WHERE` clause and quotes
+  values. It also holds `TOKEN_COUNT`, the SQL for a row's token count.
+- `conversations.py` groups requests into conversations, computes cost
+  drivers from data frames, and holds the higher-cost flag (`HIGH_PCT`,
+  `higher_cost`) that Conversations and Principals share.
+- `ui_shell.py` holds the navigation rail, the filter drawer and shared page
+  components.
+- `table_format.py` holds the column labels of the summary tables and
+  `GUID_LABEL_CHARS`, how much of a guid a chart label keeps.
+- `theme.py` holds the chart styling, palette and stat tiles.
+
 ## Deploy to Agave
 
 The app runs on Agave, https://connect.agave.pwb.posit.it. Sign in once with

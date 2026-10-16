@@ -24,9 +24,13 @@ import plotly.graph_objects as go
 from shiny import reactive, render, req, ui
 from shinywidgets import output_widget, render_widget
 
+import conversations as conv_tools
 import theme
 import usage
+from conversations import HIGH_PCT, MIN_BASELINE, higher_cost
+from pages.context import PageContext
 from theme import apply, card_num, card_usd, empty_fig, fmt_usd
+from ui_shell import page_header, table_header
 
 KINDS = {"user": "User", "content": "Content", "session": "Session", "group": "Group"}
 NOUN = {"user": "user", "content": "content item", "session": "session", "group": "group"}
@@ -34,11 +38,6 @@ NOUN = {"user": "user", "content": "content item", "session": "session", "group"
 # is not a column: it is reached through user_groups (see kind_source).
 KEY_COL = {"user": "username", "content": "content_guid", "session": "workbench_session_id"}
 RECORDS_MAX = 2000  # rows in the grid; the CSV export is never capped
-# A conversation is higher-cost when it costs more than HIGH_PCT percent of the
-# same principal's conversations. Below MIN_BASELINE conversations a percentile
-# is just the most expensive one, so nothing is flagged.
-HIGH_PCT = 95
-MIN_BASELINE = 20
 DASH, UP, DOWN = "\u2014", "\u25b2", "\u25bc"
 
 
@@ -63,24 +62,6 @@ def pred(kind: str, key: str) -> str:
 
 def short(s, n: int = 8) -> str:
     return str(s)[:n]
-
-
-def higher_cost(
-    est: pd.Series, by: pd.Series | None = None, pct: float = HIGH_PCT
-) -> pd.DataFrame:
-    """Per row: `high` (flagged) and `line` (the principal's `pct`-th
-    percentile, HIGH_PCT unless the caller sets its own).
-
-    `by` names each row's principal; without it every row shares one line.
-    A fixed dollar line flags whatever is expensive on a pricey model and misses a
-    loop on a cheap one; a principal's own percentile moves with them. Costs
-    are long-tailed, so a multiple of the median flagged a quarter of them.
-    """
-    keys = by.fillna("") if by is not None else pd.Series(0, index=est.index)
-    g = est.groupby(keys)
-    line = g.transform("quantile", pct / 100)
-    high = (g.transform("size") >= MIN_BASELINE) & (est > line)
-    return pd.DataFrame({"high": high, "line": line})
 
 
 # ---- data -----------------------------------------------------------------------
@@ -380,9 +361,10 @@ def fig_relation(rel: dict, mode: str) -> go.Figure:
 
 
 # ---- UI ---------------------------------------------------------------------------
-def panel(page_header, help_icon, table_header, conv_by: dict) -> list:
-    """The body of the Principals tab, above the existing directory table."""
-    return [
+def panel():
+    """The Principals tab, a prototype drill-down."""
+    return ui.nav_panel(
+        "Principals",
         page_header("Principals", "One user, content item, session or group, drilled into."),
         ui.div(
             ui.span("Kind", class_="strip-label"),
@@ -468,7 +450,8 @@ def panel(page_header, help_icon, table_header, conv_by: dict) -> list:
                             ui.span(ui.output_text("pf_conv_chart_title", inline=True)),
                             ui.div(
                                 ui.input_radio_buttons(
-                                    "pf_conv_by", None, conv_by, selected="model", inline=True
+                                    "pf_conv_by", None, conv_tools.CONV_BY, selected="model",
+                                    inline=True,
                                 ),
                                 class_="seg",
                             ),
@@ -487,13 +470,18 @@ def panel(page_header, help_icon, table_header, conv_by: dict) -> list:
                 ),
             ),
         ), class_="pf-tabs"),
-    ]
+    )
 
 
 # ---- server ------------------------------------------------------------------------
-def server(input, flt, where, est_cost, records_sql, formatted, fitted_grid,
-           register_sql_export, register_export, conv_tools):
-    """Wire the tab. Returns open_profile(kind, key), to jump here from elsewhere."""
+def server(input, ctx: PageContext, records_sql):
+    """Wire the tab. `records_sql` is the Raw Data page's SQL builder.
+
+    Returns open_profile(kind, key), to jump here from elsewhere.
+    """
+    flt, where, est_cost = ctx.flt, ctx.where, ctx.est_cost
+    formatted, fitted_grid = ctx.formatted, ctx.fitted_grid
+    register_export, register_sql_export = ctx.register_export, ctx.register_sql_export
     pending: reactive.Value = reactive.value(None)
 
     @reactive.calc
@@ -696,8 +684,8 @@ def server(input, flt, where, est_cost, records_sql, formatted, fitted_grid,
         df = df.assign(main_model=df.main_model.fillna(df.model), calls=df.turns,
                        duration_min=df.minutes.clip(lower=0.5),
                        cache_hit=df.cache_pct / 100)
-        key, order = conv_tools.keys(df, conv_by())
-        groups = conv_tools.groups(df, key, order)
+        key, order = conv_tools.conv_keys(df, conv_by())
+        groups = conv_tools.conv_groups(df, key, order)
         return SimpleNamespace(df=df, key=key, order=order, groups=groups)
 
     @render.text
@@ -707,11 +695,11 @@ def server(input, flt, where, est_cost, records_sql, formatted, fitted_grid,
     @render_widget
     def pf_conv_spend():
         g = conv_grouped()
-        return conv_tools.fig(g.groups, conv_by(), flt()["mode"], HIGH_PCT)
+        return conv_tools.conv_spend_fig(g.groups, conv_by(), flt()["mode"], HIGH_PCT)
 
     @render.text
     def pf_conv_groups_title():
-        return f"Conversation spend by {conv_tools.by[conv_by()].lower()}"
+        return f"Conversation spend by {conv_tools.CONV_BY[conv_by()].lower()}"
 
     @render.ui
     def pf_conv_groups_note():
@@ -726,11 +714,11 @@ def server(input, flt, where, est_cost, records_sql, formatted, fitted_grid,
 
     @render.data_frame
     def pf_conv_groups():
-        t = conv_tools.table(conv_grouped().groups)
+        t = conv_tools.conv_group_table(conv_grouped().groups)
         return fitted_grid(formatted(t))
 
     register_export("pf_conv_groups",
-                    lambda: conv_tools.table(conv_grouped().groups),
+                    lambda: conv_tools.conv_group_table(conv_grouped().groups),
                     "principal_conversation_groups.csv")
 
     @render.text

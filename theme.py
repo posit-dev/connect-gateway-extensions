@@ -265,7 +265,7 @@ def stat_tile(
 ) -> ui.Tag:
     """Stat tile: label / value / optional secondary note. Optional status dot.
 
-    `help` takes a built help icon (see `app.help_icon`) and sits beside the
+    `help` takes a built help icon (see `ui_shell.help_icon`) and sits beside the
     label, where a reader looks when the number itself needs explaining. It is
     passed in rather than built here so the wording stays with the tile.
     """
