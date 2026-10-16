@@ -7,12 +7,12 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from shiny import reactive, render, ui
-from shinywidgets import output_widget, render_widget
+from shinywidgets import output_widget
 
 import theme
 import usage
 from pages.context import PageContext
-from theme import apply, card_num, color, empty_fig
+from theme import apply, card_num, color, empty_fig, render_widget
 from ui_shell import empty_note, help_icon, page_header, plural, table_header
 
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -246,7 +246,7 @@ def server(input, ctx: PageContext):
         if df.empty or not df.v.sum():
             return empty_fig(f["mode"], "No activity in this view")
         grid = np.zeros((7, 24))
-        for r in df.itertuples():
+        for r in usage.rows(df):
             grid[int(r.d), int(r.h)] = r.v
         fmt = "$%{z:,.2f}" if spend else "%{z:,.0f} requests"
         fig = go.Figure(

@@ -3,14 +3,14 @@
 import pandas as pd
 import plotly.graph_objects as go
 from shiny import render, ui
-from shinywidgets import output_widget, render_widget
+from shinywidgets import output_widget
 
 import theme
 import usage
 from filters import sql_str
 from pages.context import PageContext
 from table_format import pretty_columns
-from theme import apply, card_num, card_usd, color, empty_fig
+from theme import apply, card_num, card_usd, color, empty_fig, render_widget
 from ui_shell import empty_note, help_icon, page_header, table_header
 
 

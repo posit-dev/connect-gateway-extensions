@@ -11,9 +11,31 @@ default:
     @just --list
 
 # Create .venv and install the app's requirements.
-setup:
-    python3 -m venv .venv
-    .venv/bin/pip install -r requirements.txt
+setup: (_install "requirements.txt")
+
+# Create .venv with the app's requirements plus the development tools.
+setup-dev: (_install "dev-requirements.txt")
+
+# Install a requirements file into .venv, creating it if missing. Uses uv when it
+# is on PATH: a venv uv made has no pip, so `.venv/bin/pip` would not exist.
+_install file:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v uv >/dev/null; then
+        [ -x {{python}} ] || uv venv .venv
+        uv pip install --python {{python}} -r {{file}}
+    else
+        [ -x {{python}} ] || python3 -m venv .venv
+        {{python}} -m pip install -r {{file}}
+    fi
+
+# Type-check the app, pages, tests and mock with pyright (see pyrightconfig.json).
+typecheck:
+    PYRIGHT_PYTHON_IGNORE_WARNINGS=1 .venv/bin/pyright
+
+# Run the unit tests. They start their own mock Connect server.
+test:
+    {{python}} -m unittest discover -s tests -v
 
 # Run the app against a real Connect server: `just run <url> <api-key>`, or
 # `just run` to use CONNECT_SERVER and CONNECT_API_KEY from the environment.
@@ -45,6 +67,7 @@ deploy server=env_var_or_default("CONNECT_SERVER", "") key=env_var_or_default("C
         --title "Posit Team AI Usage Dashboard" --entrypoint app:app \
         --exclude '.venv/*' --exclude 'demo/*' --exclude '__pycache__/*' \
         --exclude 'rsconnect-python/*' --exclude 'justfile' \
+        --exclude 'dev-requirements.txt' --exclude 'pyrightconfig.json' \
         --exclude '.gateway-cache/*'
 
 # The one way the app starts. Do not add mode-specific settings here.

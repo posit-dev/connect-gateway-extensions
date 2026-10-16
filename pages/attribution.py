@@ -4,18 +4,20 @@ Picking an outlier in the table opens it on the Principals tab, through the
 `open_profile` callback the Principals server returns.
 """
 
+from typing import cast
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from shiny import reactive, render, ui
-from shinywidgets import output_widget, render_widget
+from shinywidgets import output_widget
 
 import theme
 import usage
 from pages.context import PageContext
 from filters import TOKEN_COUNT
 from table_format import GUID_LABEL_CHARS, pretty_columns
-from theme import apply, card_num, empty_fig, fmt_usd
+from theme import apply, card_num, empty_fig, fmt_usd, render_widget
 from ui_shell import empty_note, help_icon, page_header, table_header
 
 
@@ -187,7 +189,8 @@ def server(input, ctx: PageContext, open_profile):
                 ("spend", "high estimated spend"),
                 ("per_request", "high estimated cost per request"),
             ]:
-                lg = np.log10(part[col])
+                # A ufunc on a Series returns a Series; the stubs only say ndarray.
+                lg = cast(pd.Series, np.log10(part[col]))
                 q1, q3 = lg.quantile(0.25), lg.quantile(0.75)
                 material = part[col] >= 2 * part[col].median()
                 for i in rows[((lg > q3 + 1.5 * (q3 - q1)) & material).to_numpy()]:

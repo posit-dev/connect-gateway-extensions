@@ -1,0 +1,11 @@
+# Development tools, on top of the app's own requirements: `just setup-dev`.
+-r requirements.txt
+
+# Type checking: `just typecheck`. The pip package fetches its own Node runtime.
+pyright==1.1.408
+# Type stubs for pandas; without them pyright infers pandas types from its source
+# and reports dozens of false errors.
+pandas-stubs==3.0.5.260914
+# The session smoke test in tests/test_usage.py talks to Shiny over a websocket.
+# Shiny already depends on it; listed here because the test imports it directly.
+websockets

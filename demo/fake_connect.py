@@ -170,11 +170,11 @@ def make_rows(n: int = ROWS) -> pd.DataFrame:
         provider, model, _ = random.choices(MODELS, weights)[0]
         from_content = random.random() < 0.55
         content_i = random.choices(range(len(CONTENT)), CONTENT_W)[0] if from_content else None
-        mult = CONTENT_TOKEN_X.get(content_i, 1)
+        mult = CONTENT_TOKEN_X.get(content_i, 1) if content_i is not None else 1
         # A content item either acts for its viewer or runs on its owner's
         # credentials; every third one is a service-account app.
-        service = from_content and content_i % 3 == 0
-        owner = USERS[CONTENT_OWNER[content_i]] if from_content else None
+        service = content_i is not None and content_i % 3 == 0
+        owner = USERS[CONTENT_OWNER[content_i]] if content_i is not None else None
         runaway = random.random() < (0.004 if from_content else 0.012)
         if runaway:
             turns, gap = random.randint(80, 320), (2, 12)
@@ -256,8 +256,8 @@ def make_rows(n: int = ROWS) -> pd.DataFrame:
                     viewer_email=u[1] if from_content and not service else None,
                     authenticated_email=None if from_content else u[1],
                     content_owner_email=owner[1] if owner else None,
-                    content_guid=CONTENT[content_i] if from_content else None,
-                    content_id=content_i + 1 if from_content else None,
+                    content_guid=CONTENT[content_i] if content_i is not None else None,
+                    content_id=content_i + 1 if content_i is not None else None,
                     job_key=job,
                     conversation_id=conv,
                     # Only a Workbench call carries request metadata: Posit Workbench

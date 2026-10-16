@@ -129,7 +129,7 @@ def quantile_bands(
         qs = [q for q in CONV_BY_QUANTILES if (1 - q) * n >= CONV_BY_MIN_BAND]
     else:
         qs = [1 - q for q in CONV_BY_QUANTILES if (1 - q) * n >= CONV_BY_MIN_BAND]
-    cuts = sorted({_nice(vals.quantile(q), kind) for q in qs})
+    cuts = sorted({_nice(float(vals.quantile(q)), kind) for q in qs})
     cuts = [c for c in cuts if c < vals.max()]  # nothing would sit above it
     say = {
         "int": lambda v: f"{v:,.0f}",

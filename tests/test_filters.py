@@ -52,8 +52,8 @@ class FilterTests(unittest.TestCase):
                        username, workbench_session_id, request_metadata,
                        NULL AS content_guid, NULL AS provider, NULL AS model
                 FROM (VALUES {values}) AS t(username, workbench_session_id, request_metadata)
-            ) WHERE {predicate}""").fetchone()[0]
-        self.assertEqual(found, 1)
+            ) WHERE {predicate}""").fetchone()
+        self.assertEqual(found, (1,))
 
 
 if __name__ == "__main__":

@@ -2,12 +2,12 @@
 
 import plotly.graph_objects as go
 from shiny import render, ui
-from shinywidgets import output_widget, render_widget
+from shinywidgets import output_widget
 
 import theme
 import usage
 from pages.context import PageContext
-from theme import apply, card_num, card_usd, color, empty_fig
+from theme import apply, card_num, card_usd, color, empty_fig, render_widget
 from ui_shell import chart_row, help_icon, page_header
 
 

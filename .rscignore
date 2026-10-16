@@ -7,3 +7,5 @@ __pycache__/
 rsconnect-python/
 manifest.json
 .gateway-cache/
+dev-requirements.txt
+pyrightconfig.json

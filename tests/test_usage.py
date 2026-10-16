@@ -7,13 +7,20 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import NoReturn
 from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def unused(*args, **kwargs) -> NoReturn:
+    """A PageContext service the page under test must not call."""
+    raise AssertionError("unexpected call to an unused PageContext service")
 
 
 class UsageTests(unittest.TestCase):
@@ -31,6 +38,7 @@ class UsageTests(unittest.TestCase):
         try:
             for _ in range(100):
                 if cls.mock.poll() is not None:
+                    assert cls.mock.stderr is not None
                     raise RuntimeError(cls.mock.stderr.read().decode())
                 try:
                     # Any HTTP status means the mock has finished building its export.
@@ -57,7 +65,8 @@ class UsageTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.mock.terminate()
         cls.mock.wait(timeout=5)
-        cls.mock.stderr.close()
+        if cls.mock.stderr:
+            cls.mock.stderr.close()
         cls.cache.cleanup()
 
     def test_refresh_exports_full_start_time_window(self):
@@ -86,6 +95,7 @@ class UsageTests(unittest.TestCase):
 
         with patch.object(self.usage, "_get_json", get):
             names = self.usage._fetch_content_names()
+        assert names is not None
         self.assertEqual(len(names), 215)
         self.assertEqual(names["214"], "Title 214")
 
@@ -103,7 +113,9 @@ class UsageTests(unittest.TestCase):
 
         self.fail_page = False
         with patch.object(self.usage, "_get_json", get):
-            self.assertEqual(len(self.usage._fetch_groups()), 5)
+            groups = self.usage._fetch_groups()
+            assert groups is not None
+            self.assertEqual(len(groups), 5)
             self.fail_page = True
             self.assertIsNone(self.usage._fetch_groups())
 
@@ -127,7 +139,8 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(grouped.n_hi.tolist(), [0, 1])
         table = conversations.conv_group_table(grouped)
         self.assertEqual(table.pct_of_spend.sum(), 100.0)
-        self.assertEqual(len(conversations.conv_spend_fig(grouped, "model", "dark", 90).data), 2)
+        fig = conversations.conv_spend_fig(grouped, "model", "dark", 90)
+        self.assertEqual(len(fig.data), 2)  # pyright: ignore[reportArgumentType]
         pace, pace_order = conversations.conv_keys(df, "pace")
         self.assertEqual(pace.iloc[0], conversations.SINGLE)
         self.assertEqual(pace_order[0], conversations.SINGLE)
@@ -192,8 +205,8 @@ class UsageTests(unittest.TestCase):
                 register_export=lambda name, fn, filename: exports.update(
                     {name: (fn, filename)}
                 ),
-                register_sql_export=None, est_cost_uncached=pricing.est_cost_uncached,
-                total_bars=None, measure_of=app.measure_of, formatted=app.formatted,
+                register_sql_export=unused, est_cost_uncached=pricing.est_cost_uncached,
+                total_bars=unused, measure_of=app.measure_of, formatted=app.formatted,
                 chart_labels=app.chart_labels, fitted_grid=app.fitted_grid,
                 priced_only=lambda: "",
             )
@@ -256,8 +269,8 @@ class UsageTests(unittest.TestCase):
                 register_export=lambda name, fn, filename: exports.update(
                     {name: (fn, filename)}
                 ),
-                register_sql_export=None, est_cost_uncached=pricing.est_cost_uncached,
-                total_bars=None, measure_of=app.measure_of, formatted=app.formatted,
+                register_sql_export=unused, est_cost_uncached=pricing.est_cost_uncached,
+                total_bars=unused, measure_of=app.measure_of, formatted=app.formatted,
                 chart_labels=app.chart_labels, fitted_grid=app.fitted_grid,
                 priced_only=lambda: priced_only,
             )
@@ -331,7 +344,7 @@ class UsageTests(unittest.TestCase):
             register_sql_export=lambda name, fn, filename: sql_exports.update(
                 {name: (fn, filename)}
             ),
-            est_cost_uncached=pricing.est_cost_uncached, total_bars=None,
+            est_cost_uncached=pricing.est_cost_uncached, total_bars=unused,
             measure_of=app.measure_of, formatted=app.formatted,
             chart_labels=app.chart_labels, fitted_grid=app.fitted_grid,
             priced_only=lambda: "",
@@ -424,6 +437,7 @@ class UsageTests(unittest.TestCase):
             cwd=ROOT, env={**os.environ, "GATEWAY_CACHE_DIR": cache.name},
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         )
+        assert server.stderr is not None
         try:
             for _ in range(200):
                 if server.poll() is not None:
@@ -440,8 +454,8 @@ class UsageTests(unittest.TestCase):
             self.assertIn('id="main_tabs"', html)
 
             # Every element is reported visible, so no output stays suspended.
-            data = {f".clientdata_output_{i}_hidden": False
-                    for i in set(re.findall(r'\bid="([^"]+)"', html))}
+            data: dict[str, object] = {f".clientdata_output_{i}_hidden": False
+                                       for i in set(re.findall(r'\bid="([^"]+)"', html))}
             data.update(main_tabs="Overview", preset="30d", dark_mode="dark")
 
             async def session():

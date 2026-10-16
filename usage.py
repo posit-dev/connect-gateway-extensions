@@ -56,11 +56,12 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Iterable
 
 import duckdb
 import pandas as pd
 
-CONNECT_SERVER = os.environ.get("CONNECT_SERVER")
+CONNECT_SERVER = os.environ.get("CONNECT_SERVER") or ""
 CONNECT_API_KEY = os.environ.get("CONNECT_API_KEY")
 EXPORT_PATH = "__api__/v1/system/gateway/usage/export"
 LOOKBACK_DAYS = 30
@@ -649,6 +650,13 @@ def _shape_into(target: str, path: Path, window_from: str, window_to: str, cutof
                 raise
 
 
+def _count(table: str) -> int:
+    """Rows in a table. The caller holds _lock."""
+    row = _con.sql(f"SELECT COUNT(*) FROM {table}").fetchone()
+    assert row is not None  # COUNT(*) always returns one row
+    return row[0]
+
+
 def _read_export(path: Path, window_from: str, window_to: str) -> int:
     """Replace gateway_events with one downloaded export; return its row count."""
     with _lock:
@@ -657,7 +665,7 @@ def _read_export(path: Path, window_from: str, window_to: str) -> int:
             "CREATE OR REPLACE TABLE gateway_events AS ",
             path, window_from, window_to, _EPOCH,
         )
-        return _con.sql("SELECT COUNT(*) FROM gateway_events").fetchone()[0]
+        return _count("gateway_events")
 
 
 def _merge_export(path: Path, window_from: str, window_to: str, cutoff: str) -> int:
@@ -688,7 +696,7 @@ def _merge_export(path: Path, window_from: str, window_to: str, cutoff: str) -> 
         except BaseException:
             _con.execute("ROLLBACK")
             raise
-        added = _con.sql("SELECT COUNT(*) FROM gateway_delta").fetchone()[0]
+        added = _count("gateway_delta")
         _con.execute("DROP TABLE gateway_delta")
         return added
 
@@ -901,17 +909,18 @@ def _load() -> dict:
             source = "snapshot"
 
     now = datetime.now(timezone.utc)
+    prev = _state
     incremental = (
-        _state is not None
-        and now - _state["full_at"] < FULL_RELOAD_EVERY
-        and _state["as_of"] - REFETCH_MARGIN >= _parse(window_from)
+        prev is not None
+        and now - prev["full_at"] < FULL_RELOAD_EVERY
+        and prev["as_of"] - REFETCH_MARGIN >= _parse(window_from)
     )
-    if incremental:
+    if prev is not None and incremental:
         # Never move the watermark backwards. A snapshot written by another
         # process (another node, in HA) can be a little ahead of this clock,
         # and from > to is a request Connect refuses.
-        as_of = max(as_of, _state["as_of"].strftime(_RFC3339))
-        cutoff = (_state["as_of"] - REFETCH_MARGIN).strftime(_RFC3339)
+        as_of = max(as_of, prev["as_of"].strftime(_RFC3339))
+        cutoff = (prev["as_of"] - REFETCH_MARGIN).strftime(_RFC3339)
         # Connect selects start-time partitions, not ingest-time partitions.
         # Always export the full start-time window: otherwise deleting rows
         # with ingest_time >= cutoff would erase older-started calls absent
@@ -920,7 +929,7 @@ def _load() -> dict:
             _export_url(window_from, window_to, as_of),
             lambda p: _merge_export(p, window_from, window_to, cutoff),
         )
-        full_at = _state["full_at"]
+        full_at = prev["full_at"]
     else:
         new_rows = _ingest(
             _export_url(window_from, window_to, as_of),
@@ -929,7 +938,7 @@ def _load() -> dict:
         full_at = now
     _state = {"as_of": _parse(as_of), "full_at": full_at}
     with _lock:
-        rows = _con.sql("SELECT COUNT(*) FROM gateway_events").fetchone()[0]
+        rows = _count("gateway_events")
 
     # A failed refresh keeps the last good catalog. With no catalog at all the
     # load fails, as it does for the export: spend has no other source.
@@ -999,9 +1008,15 @@ def q(sql: str) -> pd.DataFrame:
         return _con.sql(sql).df()
 
 
-def scalar(sql: str):
+def scalar(sql: str) -> Any:
     df = q(sql)
     return None if df.empty else df.iloc[0, 0]
+
+
+def rows(df: pd.DataFrame) -> Iterable[Any]:
+    """df.itertuples(), typed so a row's columns read as attributes."""
+    return df.itertuples()
+
 
 
 def export_csv(sql: str) -> Path:

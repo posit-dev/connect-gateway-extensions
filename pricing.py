@@ -13,6 +13,13 @@ import usage
 _PROVIDER_ALIASES = {"anthropic": ("anthropic",), "aws.bedrock": ("bedrock", "aws.bedrock")}
 
 
+def _prices() -> dict:
+    """usage.PRICES, which usage.load() always sets before anything prices a row."""
+    prices = usage.PRICES
+    assert prices is not None, "usage.load() has not run"
+    return prices
+
+
 def _rate_term(i: float, o: float, cw: float, cr: float) -> str:
     """The spend for one row at these four $/Mtok rates, before the /1e6.
 
@@ -103,7 +110,7 @@ def rate_sql() -> dict[str, str]:
     evaluated once per distinct model rather than once per row.
     """
     global _RATES_CACHE
-    prices = usage.PRICES
+    prices = _prices()
     if _RATES_CACHE[0] is not prices:
         _RATES_CACHE = (
             prices,
@@ -118,7 +125,7 @@ def rate_sql() -> dict[str, str]:
 def model_rates(model: str) -> tuple | None:
     """(input, output, cache write, cache read) in USD per token for a model's
     base list rate, Anthropic's first, or None when the catalog has no price."""
-    hits = {p: r for (p, region, m), r in usage.PRICES.items() if m == model and not region}
+    hits = {p: r for (p, region, m), r in _prices().items() if m == model and not region}
     rates = hits.get("anthropic") or next(iter(hits.values()), None)
     return tuple(v / 1e6 for v in rates) if rates else None
 
@@ -126,7 +133,7 @@ def model_rates(model: str) -> tuple | None:
 def est_cost_uncached() -> str:
     """est_cost with no prompt-cache discount (see _build_est_cost)."""
     global _NOCACHE_COST_CACHE
-    prices = usage.PRICES
+    prices = _prices()
     if _NOCACHE_COST_CACHE[0] is not prices:
         _NOCACHE_COST_CACHE = (prices, _build_est_cost(prices, uncached=True))
     return _NOCACHE_COST_CACHE[1]
@@ -144,7 +151,7 @@ def est_cost() -> str:
     without a catalog, so there is always one here.
     """
     global _EST_COST_CACHE
-    prices = usage.PRICES
+    prices = _prices()
     cached_prices, cached_sql = _EST_COST_CACHE
     if cached_prices is prices:
         return cached_sql

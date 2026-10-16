@@ -87,19 +87,19 @@ def catalog() -> dict:
                 if r.email and r.email != r.username
                 else r.username
             )
-            for r in usage.q("""SELECT username, MAX(user_email) AS email
+            for r in usage.rows(usage.q("""SELECT username, MAX(user_email) AS email
                                 FROM gateway_events WHERE username IS NOT NULL
-                                GROUP BY 1 ORDER BY 1""").itertuples()
+                                GROUP BY 1 ORDER BY 1"""))
         },
         # Workbench sessions: the id is the value, the name (when there is one)
         # the label, so typing either finds the session.
         "session_labels": {
             r.sid: (f"{r.name} \u00b7 {r.sid}" if r.name and r.name != r.sid else r.sid)
-            for r in usage.q("""SELECT workbench_session_id AS sid,
+            for r in usage.rows(usage.q("""SELECT workbench_session_id AS sid,
                                       MAX(workbench_session_name) AS name
                                FROM gateway_events
                                WHERE workbench_session_id IS NOT NULL
-                               GROUP BY 1 ORDER BY 2, 1""").itertuples()
+                               GROUP BY 1 ORDER BY 2, 1"""))
         },
         "contents": usage.q("""SELECT DISTINCT content_guid FROM gateway_events
                             WHERE content_guid IS NOT NULL ORDER BY 1""")[
@@ -111,10 +111,10 @@ def catalog() -> dict:
             r.guid: " \u00b7 ".join(
                 p for p in (usage.content_name(r.guid), r.owner, r.guid) if p
             )
-            for r in usage.q("""SELECT content_guid AS guid,
+            for r in usage.rows(usage.q("""SELECT content_guid AS guid,
                                       MAX(content_owner_username) AS owner
                                FROM gateway_events WHERE content_guid IS NOT NULL
-                               GROUP BY 1 ORDER BY 1""").itertuples()
+                               GROUP BY 1 ORDER BY 1"""))
         },
         "meta": meta_choices(),
         "statuses": usage.q("""SELECT DISTINCT CAST(status_code AS VARCHAR) status
@@ -151,7 +151,7 @@ def meta_choices() -> dict[str, str]:
         if len(grp) > META_MAX_VALUES:
             continue
         for v in grp["v"]:
-            out[meta_id(key, v)] = f"{key}: {v}"
+            out[meta_id(str(key), v)] = f"{key}: {v}"
     return out
 
 
@@ -278,7 +278,7 @@ def preset_range(preset: str, start: date, end: date) -> tuple[date, date]:
 
 
 
-def app_ui(request: Request):
+def app_ui(request: Request | None):
     return _shell(
         overview.panel(),
         attribution.panel(),
@@ -739,7 +739,7 @@ def server(input, output, session):
 
     def total_bars(
         f, m, dim: str, color_kind: str | None, limit: int = 15, height: int = 320
-    ):
+    ) -> go.Figure:
         """Category totals, biggest last so the bars read bottom-up."""
         df = usage.q(f"""SELECT {dim} AS k, SUM({m["expr"]}) v, COUNT(*) req
                          FROM gateway_events WHERE {where(f)} AND {dim} IS NOT NULL
@@ -785,7 +785,7 @@ def server(input, output, session):
         shown = df.head(10)
         rows = [
             ui.tags.li(ui.tags.code(r.model), f" \u00b7 {int(r.requests):,} {plural(r.requests, 'request')}")
-            for r in shown.itertuples()
+            for r in usage.rows(shown)
         ]
         if n > len(shown):
             rows.append(ui.tags.li(f"and {n - len(shown)} more"))

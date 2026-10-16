@@ -104,7 +104,7 @@ def filter_label(text: str, key: str) -> ui.Tag:
     )
 
 
-def table_header(title: str, dl_id: str, help: ui.Tag | None = None) -> ui.Tag:
+def table_header(title: str | ui.Tag, dl_id: str, help: ui.Tag | None = None) -> ui.CardItem:
     """Card header with a right-aligned CSV export button, and an optional ?."""
     return ui.card_header(
         ui.div(

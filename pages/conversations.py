@@ -9,7 +9,7 @@ the topbar's unpriced-model warning.
 import pandas as pd
 import plotly.graph_objects as go
 from shiny import reactive, render, ui
-from shinywidgets import output_widget, render_widget
+from shinywidgets import output_widget
 
 import theme
 import usage
@@ -21,7 +21,7 @@ from conversations import (
 from filters import sql_str
 from pages.context import PageContext
 from pricing import model_rates, rate_sql
-from theme import apply, card_num, empty_fig, fmt_num, fmt_usd
+from theme import apply, card_num, empty_fig, fmt_num, fmt_usd, render_widget
 from ui_shell import empty_note, help_icon, page_header, table_header
 
 
@@ -335,7 +335,7 @@ def server(input, ctx: PageContext):
         hot = df[(df.s >= 0.1) & (df.c > 0)]
         if hot.empty:
             return None
-        r = hot.loc[(hot.s / hot.c).idxmax()]
+        r = hot.loc[(hot.s / hot.c).idxmax()]  # pyright: ignore[reportCallIssue, reportArgumentType]
         if r.s / r.c < 1.5:
             return ui.div("Spend is spread roughly in line with conversation counts.",
                           class_="card-note")

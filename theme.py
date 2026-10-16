@@ -8,8 +8,15 @@ chart is paired with direct labels and/or a table view.
 
 from __future__ import annotations
 
+from typing import Any, Callable, cast
+
 import plotly.graph_objects as go
+import shinywidgets
 from shiny import ui
+
+# shinywidgets.render_widget, typed for what this app hands it. It renders plotly
+# figures at runtime, but its annotations only admit ipywidgets.
+render_widget = cast(Callable[[Callable[[], Any]], Any], shinywidgets.render_widget)
 
 TOKENS = {
     "light": {
@@ -259,7 +266,7 @@ TILE_TEXT_MAX = 10
 def stat_tile(
     label: str,
     value: str,
-    note: str | None = None,
+    note: str | ui.Tag | None = None,
     status: str | None = None,
     help: ui.Tag | None = None,
 ) -> ui.Tag:

@@ -3,6 +3,10 @@
 from dataclasses import dataclass
 from typing import Callable
 
+import pandas as pd
+import plotly.graph_objects as go
+from shiny import render
+
 
 @dataclass(frozen=True)
 class PageContext:
@@ -13,9 +17,9 @@ class PageContext:
     register_export: Callable[..., None]
     register_sql_export: Callable[..., None]
     est_cost_uncached: Callable[[], str]
-    total_bars: Callable[..., object]
+    total_bars: Callable[..., go.Figure]
     measure_of: Callable[[dict], dict]
-    formatted: Callable[..., object]
+    formatted: Callable[[pd.DataFrame], pd.DataFrame]
     chart_labels: Callable[..., list]
-    fitted_grid: Callable[..., object]
+    fitted_grid: Callable[..., render.DataGrid]
     priced_only: Callable[[], str]  # WHERE fragment leaving out unpriced models

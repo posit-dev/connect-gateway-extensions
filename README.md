@@ -66,6 +66,17 @@ Like Connect, the mock wants an API key on every request. Models the catalog
 does not price cost $0 against either backend; the mock's `gpt-5` traffic is
 one such model.
 
+## Develop
+
+```bash
+just setup-dev    # once: .venv + requirements + dev-requirements.txt
+just test         # unit tests; they start their own mock Connect
+just typecheck    # pyright, configured in pyrightconfig.json
+```
+
+`dev-requirements.txt` adds pyright, the pandas type stubs, and `websockets`
+for the session smoke test. Neither it nor `pyrightconfig.json` is deployed.
+
 ## Architecture
 
 `app:app` is the entrypoint. `app.py` is the shell and the wiring. It builds

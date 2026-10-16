@@ -22,14 +22,14 @@ from types import SimpleNamespace
 import pandas as pd
 import plotly.graph_objects as go
 from shiny import reactive, render, req, ui
-from shinywidgets import output_widget, render_widget
+from shinywidgets import output_widget
 
 import conversations as conv_tools
 import theme
 import usage
 from conversations import HIGH_PCT, MIN_BASELINE, higher_cost
 from pages.context import PageContext
-from theme import apply, card_num, card_usd, empty_fig, fmt_usd
+from theme import apply, card_num, card_usd, empty_fig, fmt_usd, render_widget
 from ui_shell import page_header, table_header
 
 KINDS = {"user": "User", "content": "Content", "session": "Session", "group": "Group"}
@@ -522,7 +522,7 @@ def server(input, ctx: PageContext, records_sql):
         info = identity(e.kind, e.key, e.w, e.cost)
         n = len(e.peers)
         top_pct = math.ceil(100 * e.rank / n) / 100 if n else 1
-        facts: list[tuple[str, object]] = [
+        facts: list[tuple[str, ui.TagChild]] = [
             ("rank", f"#{e.rank} of {n:,} {e.noun}s by estimated spend \u00b7 top {top_pct:.0%}")
         ]
         sub = KINDS[e.kind]
