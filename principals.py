@@ -276,6 +276,30 @@ def conversations(w: str, p: str, cost: str) -> pd.DataFrame:
     return df
 
 
+# Within this fraction of everyone's line, a principal reads as "in line" rather
+# than above or below: a few percent either way is noise, not a habit.
+VERSUS_EVEN = 0.05
+
+
+def versus_org(mine: float, org: float, say, title: str) -> ui.Tag:
+    """A badge saying where this principal's p75 (the tile's figure) sits
+    against everyone's ("typical"), and everyone's figure beside it. Lower is
+    better for every measure it is used on (cost, context), so below is green
+    and above is amber."""
+    d = mine / org - 1 if org else 0.0
+    if abs(d) < VERSUS_EVEN:
+        cls, text = "even", "\u2248 typical"
+    elif d < 0:
+        cls, text = "below", f"\u25bc {-d:.0%} below typical"
+    else:
+        cls, text = "above", f"\u25b2 {d:.0%} above typical"
+    return ui.div(
+        ui.span(text, class_=f"versus versus-{cls}"),
+        ui.span(say(org), class_="versus-detail"),
+        class_="versus-row", title=title,
+    )
+
+
 # ---- figures ------------------------------------------------------------------------
 def fig_trend(me, f, grain: str = "day") -> go.Figure:
     mode = f["mode"]
@@ -576,12 +600,12 @@ def server(input, ctx: PageContext, records_sql):
         cache = (s.cr / s.tin) if s.tin else 0
         cv = convs()
         if cv.empty:
-            conv = theme.stat_tile("Conversation cost", DASH, "no conversation ids in view")
+            conv = theme.stat_tile(f"Conversation cost (p{HIGH_PCT:g})", DASH,
+                                   "no conversation ids in view")
         else:
-            # One tile: the median as the figure (a few expensive conversations would
-            # drag a mean far above what one usually costs), and under it how
-            # much of the spend sits in the costliest conversations, those above
-            # the HIGH_PCT percentile of this principal's own.
+            # One tile: this principal's HIGH_PCT percentile as the figure, set
+            # against everyone's, and under it how much of the spend sits in the
+            # costliest conversations, those above that percentile.
             run, total = cv[cv.high], cv.est.sum()
             if len(cv) < MIN_BASELINE:
                 flagged = f"needs {MIN_BASELINE}+ conversations to flag the most expensive"
@@ -593,15 +617,48 @@ def server(input, ctx: PageContext, records_sql):
                           f"{NOUN[e.kind]}'s conversations.")
             else:
                 flagged = f"none above p{HIGH_PCT:g}"
+            # Where this principal's p75 sits against the whole server's.
+            org = org_line()
+            own = float(cv.line.iloc[0])
+            if org is None:
+                versus = None
+            elif len(cv) < MIN_BASELINE:
+                versus = ui.div(f"Everyone's p{HIGH_PCT:g}: {fmt_usd(org)}")
+            else:
+                versus = versus_org(
+                    own, org, fmt_usd,
+                    f"Typical: the p{HIGH_PCT:g} of conversation cost across every "
+                    "conversation in view.")
             conv = theme.stat_tile(
-                "Conversation cost (median)", fmt_usd(cv.est.median()),
-                ui.div(flagged))
+                f"Conversation cost (p{HIGH_PCT:g})", fmt_usd(own),
+                ui.div(versus, ui.div(flagged)))
+        peaks = cv.peak_context.dropna() if not cv.empty else pd.Series(dtype=float)
+        if len(peaks) == 0:
+            ctx = theme.stat_tile(f"Peak context (p{HIGH_PCT:g})", DASH,
+                                  "no conversation ids in view")
+        else:
+            line = org_peak_line()
+            mine = float(peaks.quantile(HIGH_PCT / 100))
+            if line is None:
+                note = f"needs {MIN_BASELINE}+ conversations overall for a p{HIGH_PCT:g} line"
+            elif len(peaks) < MIN_BASELINE:
+                note = f"Everyone's p{HIGH_PCT:g}: {card_num(line)} tokens"
+            else:
+                note = versus_org(
+                    mine, line, card_num,
+                    "Peak context is the largest input, cached and uncached "
+                    "together, any request in a conversation sent. A high one "
+                    "means the conversation was kept going instead of restarted. "
+                    f"Typical: the p{HIGH_PCT:g} across every conversation in view, "
+                    "in tokens.")
+            ctx = theme.stat_tile(f"Peak context (p{HIGH_PCT:g})", card_num(mine), note)
         return ui.layout_columns(
             theme.stat_tile("Estimated spend", card_usd(s.spend),
                             f"{card_num(s.requests)} requests"),
             theme.stat_tile("Cache hit", f"{cache:.0%}", "of input read from the prompt cache"),
             conv,
-            col_widths=[3, 3, 6], class_="kpi-row",
+            ctx,
+            col_widths=[2, 2, 4, 4], class_="kpi-row",
         )
 
     @render_widget
@@ -671,6 +728,28 @@ def server(input, ctx: PageContext, records_sql):
         return conversations(e.w, e.p, e.cost)
 
     @reactive.calc
+    def org_convs() -> pd.DataFrame:
+        e = ent()
+        return conversations(e.w, "TRUE", e.cost)
+
+    @reactive.calc
+    def org_line() -> float | None:
+        """The HIGH_PCT percentile of conversation cost across everyone in view."""
+        everyone = org_convs()
+        if len(everyone) < MIN_BASELINE:
+            return None
+        return float(everyone.est.quantile(HIGH_PCT / 100))
+
+    @reactive.calc
+    def org_peak_line() -> float | None:
+        """The HIGH_PCT percentile of peak context (the largest input, cached and
+        uncached together, any request in the conversation sent) across everyone."""
+        peaks = org_convs().peak_context.dropna()
+        if len(peaks) < MIN_BASELINE:
+            return None
+        return float(peaks.quantile(HIGH_PCT / 100))
+
+    @reactive.calc
     def conv_by() -> str:
         return input.pf_conv_by() or "model"
 
@@ -683,7 +762,7 @@ def server(input, ctx: PageContext, records_sql):
         # the frame the Conversations page's grouping works on
         df = df.assign(main_model=df.main_model.fillna(df.model), calls=df.turns,
                        duration_min=df.minutes.clip(lower=0.5),
-                       cache_hit=df.cache_pct / 100)
+                       cache_hit=df.cache_pct / 100, peak_input=df.peak_context)
         key, order = conv_tools.conv_keys(df, conv_by())
         groups = conv_tools.conv_groups(df, key, order)
         return SimpleNamespace(df=df, key=key, order=order, groups=groups)
@@ -710,7 +789,9 @@ def server(input, ctx: PageContext, records_sql):
                 f"(needs {MIN_BASELINE}+).", class_="card-note")
         return ui.div(
             f"Shares are of this {NOUN[input.pf_kind()]}'s own conversations. "
-            f"Higher cost means above p{HIGH_PCT} of them.", class_="card-note")
+            f"Higher cost means above p{HIGH_PCT} of them."
+            + (f" Across everyone, p{HIGH_PCT} is {fmt_usd(org_line())}."
+               if org_line() is not None else ""), class_="card-note")
 
     @render.data_frame
     def pf_conv_groups():

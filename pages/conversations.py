@@ -348,6 +348,7 @@ def server(input, ctx: PageContext):
             "pace": "Single-request conversations" if lab == SINGLE
             else f"Conversations pausing {lab} between requests",
             "cache": f"Conversations with {lab} of input cached",
+            "context": f"Conversations peaking at {lab} tokens of context",
             "tool": f"Conversations mostly through {lab}",
         }[input.conv_by() or "model"]
         return ui.div(

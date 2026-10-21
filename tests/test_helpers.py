@@ -270,7 +270,7 @@ def test_higher_cost_needs_a_baseline_and_flags_above_the_percentile():
     est = pd.Series([1.0] * 99 + [100.0])
     out = conversations.higher_cost(est)
     assert out.high.tolist() == [False] * 99 + [True]
-    assert (out.line == est.quantile(0.95)).all()
+    assert (out.line == est.quantile(0.75)).all()
 
 
 def test_higher_cost_below_min_baseline_flags_nothing():
@@ -284,7 +284,7 @@ def test_higher_cost_is_per_principal_and_treats_missing_as_one_group():
     out = conversations.higher_cost(est, by)
     assert out.high.tolist() == [False] * 40 + [True, True]
     for who in "ab":
-        assert (out.line[by == who] == est[by == who].quantile(0.95)).all()
+        assert (out.line[by == who] == est[by == who].quantile(0.75)).all()
     small = conversations.higher_cost(pd.Series([1.0, 9.0]), pd.Series([None, None]))
     assert not small.high.any()
 

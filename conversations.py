@@ -17,7 +17,7 @@ from theme import apply, empty_fig
 # same principal's conversations. Below MIN_BASELINE conversations a percentile
 # is just the most expensive one, so nothing is flagged. Principals uses these
 # too; they live here so that module can import this one without a cycle.
-HIGH_PCT = 95
+HIGH_PCT = 75
 MIN_BASELINE = 20
 
 
@@ -64,7 +64,7 @@ COMPACT_AT = 100_000
 # What the conversation spend chart can group by.
 CONV_BY = {
     "model": "Model", "duration": "Duration", "turns": "Turns",
-    "pace": "Pace", "cache": "Cache hit", "tool": "Tool",
+    "pace": "Pace", "cache": "Cache hit", "context": "Peak context", "tool": "Tool",
 }
 # The model view names this many models and folds the rest into "other".
 CONV_BY_MODELS = 7
@@ -89,6 +89,15 @@ def fmt_secs(s: float) -> str:
     return f"{s / size:.2g} {unit}" if unit != "s" else f"{s:.0f} s"
 
 
+def fmt_tokens(v: float) -> str:
+    """A token count, short: 800, 45k, 1.2M."""
+    if v >= 1e6:
+        return f"{v / 1e6:.2g}M"
+    if v >= 1e3:
+        return f"{v / 1e3:.2g}k"
+    return f"{v:.0f}"
+
+
 def _up2(v: float) -> float:
     """v rounded up to two significant figures."""
     step = 10 ** np.floor(np.log10(v)) / 10
@@ -105,6 +114,8 @@ def _nice(v: float, kind: str) -> float:
         return float(np.ceil(v))
     if kind == "share":
         return float(np.ceil(round(v * 100, 9)) / 100)
+    if kind == "tokens":
+        return _up2(v) if v > 0 else 0.0
     if v <= 0:
         return 0.0
     size, _unit = _time_unit(v)
@@ -135,6 +146,7 @@ def quantile_bands(
         "int": lambda v: f"{v:,.0f}",
         "share": lambda v: f"{100 * v:.0f}%",
         "secs": fmt_secs,
+        "tokens": fmt_tokens,
     }[kind]
     while True:
         edges = [-np.inf, *cuts, np.inf]
@@ -153,7 +165,7 @@ def conv_keys(df: pd.DataFrame, by: str) -> tuple[pd.Series, list[str]]:
     """Each conversation's group for the chosen kind, and the groups in order.
 
     `df` has one row per conversation: est, main_model, duration_min, calls,
-    cache_hit, med_idle. Every grouping comes from the data in view: models are
+    cache_hit, peak_input, med_idle. Every grouping comes from the data in view: models are
     ranked by spend with the tail folded into "other", and the numeric views
     are cut at percentiles of the conversations themselves (see quantile_bands).
     """
@@ -191,6 +203,7 @@ def conv_keys(df: pd.DataFrame, by: str) -> tuple[pd.Series, list[str]]:
             "duration": (df.duration_min * 60, "secs"),
             "turns": (df.calls, "int"),
             "cache": (df.cache_hit.fillna(0), "share"),
+            "context": (df.peak_input.fillna(0), "tokens"),
         }[by]
         key, order = quantile_bands(vals, kind)
         key = key.astype(str)
@@ -218,6 +231,7 @@ CONV_BY_AXIS = {
     "turns": "requests in the conversation",
     "pace": "typical pause between requests (median)",
     "cache": "input read from the prompt cache",
+    "context": "peak context: largest input in the conversation (tokens, cached included)",
 }
 
 

@@ -255,6 +255,43 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
   text-overflow: ellipsis;
 }
 .tile-note { color: var(--text-muted); font-size: 0.78rem; min-height: 1em; }
+/* Where a principal stands against everyone (principals.versus_org): a tinted
+   badge loud enough to read next to the figure, then the two numbers. */
+.versus-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
+  margin: 4px 0 6px;
+}
+.versus {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.versus-below {
+  color: var(--good-text);
+  background: color-mix(in srgb, var(--good-text) 16%, transparent);
+  border-color: color-mix(in srgb, var(--good-text) 50%, transparent);
+}
+.versus-above {
+  color: #9a6b00;
+  background: color-mix(in srgb, #e0a72c 20%, transparent);
+  border-color: color-mix(in srgb, #e0a72c 60%, transparent);
+}
+[data-bs-theme="dark"] .versus-above { color: #f2bd4a; }
+.versus-even {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
+  border-color: color-mix(in srgb, var(--text-muted) 45%, transparent);
+}
+.versus-detail {
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
 /* Tiles in one row share a height, so a tile with a short note does not sit
    shorter than its neighbours. */
 .kpi-row > * { display: flex; }
