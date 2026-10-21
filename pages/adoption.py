@@ -31,9 +31,9 @@ def panel():
                     "rolling window ending on that day:"
                 ),
                 ui.tags.ul(
-                    ui.tags.li("DAU: that day only."),
-                    ui.tags.li("WAU: that day and the 6 before it."),
-                    ui.tags.li("MAU: that day and the 29 before it."),
+                    ui.tags.li("DAU (Daily Active Users): that day only."),
+                    ui.tags.li("WAU (Weekly Active Users): that day and the 6 before it."),
+                    ui.tags.li("MAU (Monthly Active Users): that day and the 29 before it."),
                 ),
                 ui.p(
                     "Windows can reach back before the first day on the "
@@ -136,9 +136,10 @@ def server(input, ctx: PageContext):
                 f"{avg_dau:,.1f}",
                 f"daily average over {len(df)} {plural(len(df), 'day')}",
                 help=help_icon(
-                    "Average daily users",
+                    "DAU = Daily Active Users",
                     ui.p(
-                        "On a typical day, this many people used the gateway. ",
+                        "Avg DAU is the average number of active users per day. On a "
+                        "typical day, this many people used the gateway.",
                         class_="mb-0",
                     ),
                 ),
@@ -148,7 +149,7 @@ def server(input, ctx: PageContext):
                 card_num(last.wau),
                 f"7 days to {last.day:%b %d}",
                 help=help_icon(
-                    "Weekly users",
+                    "WAU = Weekly Active Users",
                     ui.p(
                         "How many different people used the gateway in the last 7 days.",
                         class_="mb-0",
@@ -160,7 +161,7 @@ def server(input, ctx: PageContext):
                 card_num(last.mau),
                 f"30 days to {last.day:%b %d}",
                 help=help_icon(
-                    "Monthly users",
+                    "MAU = Monthly Active Users",
                     ui.p(
                         "How many different people used the gateway in the last "
                         "30 days.",
@@ -173,7 +174,7 @@ def server(input, ctx: PageContext):
                 f"{100 * avg_dau / last.mau:,.0f}%" if last.mau else "\u2013",
                 "avg DAU / MAU",
                 help=help_icon(
-                    "Stickiness",
+                    "Stickiness = avg DAU / MAU",
                     ui.p(
                         "Of the people who used the gateway this month, the share "
                         "who show up on a typical day.",
