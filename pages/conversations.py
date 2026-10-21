@@ -60,7 +60,7 @@ def panel():
                     ),
                     ui.div(
                         ui.input_radio_buttons(
-                            "conv_by", None, CONV_BY, selected="model", inline=True
+                            "conv_by", None, CONV_BY, selected="context", inline=True
                         ),
                         class_="seg",
                     ),
@@ -299,7 +299,7 @@ def server(input, ctx: PageContext):
     @reactive.calc
     def conv_spend_df() -> pd.DataFrame:
         """Conversation spend per group of the chosen kind, in display order."""
-        df, by = sessions_df(), input.conv_by() or "model"
+        df, by = sessions_df(), input.conv_by() or "context"
         key, order = conv_keys(df, by)
         return conv_groups(df, key, order)
 
@@ -321,7 +321,7 @@ def server(input, ctx: PageContext):
     def conv_spend_by():
         f = flt()
         return conv_spend_fig(
-            conv_spend_df(), input.conv_by() or "model", f["mode"], CONV_HIGH_PCT
+            conv_spend_df(), input.conv_by() or "context", f["mode"], CONV_HIGH_PCT
         )
 
     @render.ui
@@ -350,7 +350,7 @@ def server(input, ctx: PageContext):
             "cache": f"Conversations with {lab} of input cached",
             "context": f"Conversations peaking at {lab} tokens of context",
             "tool": f"Conversations mostly through {lab}",
-        }[input.conv_by() or "model"]
+        }[input.conv_by() or "context"]
         return ui.div(
             f"{name} are {100 * r.c:.0f}% of conversations but {100 * r.s:.0f}% of "
             f"spend, at {fmt_usd(r.spend / r.n)} each against "

@@ -43,7 +43,7 @@ def panel():
             ui.card(
                 ui.card_header(
                     ui.div(
-                        ui.span("Estimated cache savings over time by tool"),
+                        ui.span("Estimated cache savings over time by harness"),
                         help_icon(
                             "How are savings estimated?",
                             ui.p(

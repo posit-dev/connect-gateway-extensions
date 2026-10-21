@@ -28,7 +28,7 @@ PAGE_OUTPUTS = {
                  "usage_heatmap"],
     "Models": ["model_kpis", "models_bars", "models_adoption", "cache_savings_time",
                "cache_rate_time", "latency_time", "errors_time", "models_table"],
-    "Attribution": ["attr_kpis", "attr_bars", "attr_rate_bars", "attr_scatter", "attr_table"],
+    "Attribution": ["attr_kpis", "attr_bars", "attr_scatter", "attr_table"],
     "Conversations": ["conv_kpis", "conv_spend_by", "conv_spend_note", "top_sessions"],
     "Raw Data": ["records_table", "records_title"],
     "Shell": ["nav_rail", "topbar_meta", "topbar_status"],
@@ -209,7 +209,7 @@ class TestBookmark:
         reply = visit(app_server, scenario)
         (url,) = reply.query_strings()
         assert set(bookmark_query(url)) == {
-            "_inputs_", "preset", "grain", "attr_kind", "attr_order", "pf_kind", "date_range",
+            "_inputs_", "preset", "grain", "attr_kind", "pf_kind", "date_range",
             "f_users", "f_contents", "f_sessions", "f_providers", "f_models", "f_meta",
             "dark_mode", "main_tabs",
         }

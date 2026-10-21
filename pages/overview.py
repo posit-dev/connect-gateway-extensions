@@ -1,4 +1,4 @@
-"""Overview page: spend KPIs and spend by origin/tool, provider, and model."""
+"""Overview page: spend KPIs and spend by origin/harness, provider, and model."""
 
 import plotly.graph_objects as go
 from shiny import render, ui
@@ -16,38 +16,6 @@ def panel():
         "Overview",
         page_header("Consumption Overview"),
         ui.output_ui("kpis"),
-        ui.div(
-            ui.div(
-                ui.h6("Estimated spend by", class_="row-question"),
-                ui.div(
-                    ui.input_radio_buttons(
-                        "origin_tool", None, {"origin": "Origin", "tool": "Tool"},
-                        selected="origin", inline=True,
-                    ),
-                    class_="seg",
-                ),
-                help_icon(
-                    ui.p(
-                        ui.strong("Origin"), " is where the request came from: "
-                        " Connect, a Workbench, or "
-                        "client running locally."
-                    ),
-                    ui.p(
-                        ui.strong("Tool"), " is the software that made the call. This is derived "
-                        "from the User-Agent header the caller sent.",
-                        class_="mb-0",
-                    ),
-                ),
-                class_="hdr-flex-left origin-tool-head",
-            ),
-            ui.layout_columns(
-                ui.card(ui.card_header("Total"), output_widget("origin_total")),
-                ui.card(ui.card_header("Share"), output_widget("origin_share")),
-                col_widths=[7, 5],
-            ),
-            class_="question-block",
-        ),
-        chart_row("Estimated spend by provider", "provider_total", "provider_share"),
         ui.div(
             ui.h6("Estimated spend by model", class_="row-question"),
             ui.layout_columns(
@@ -75,6 +43,38 @@ def panel():
             ),
             class_="question-block",
         ),
+        ui.div(
+            ui.div(
+                ui.h6("Estimated spend by", class_="row-question"),
+                ui.div(
+                    ui.input_radio_buttons(
+                        "origin_tool", None, {"origin": "Origin", "tool": "Harness"},
+                        selected="origin", inline=True,
+                    ),
+                    class_="seg",
+                ),
+                help_icon(
+                    ui.p(
+                        ui.strong("Origin"), " is where the request came from: "
+                        " Connect, a Workbench, or "
+                        "client running locally."
+                    ),
+                    ui.p(
+                        ui.strong("Harness"), " is the client software that made the call. This is derived "
+                        "from the User-Agent header the caller sent.",
+                        class_="mb-0",
+                    ),
+                ),
+                class_="hdr-flex-left origin-tool-head",
+            ),
+            ui.layout_columns(
+                ui.card(ui.card_header("Total"), output_widget("origin_total")),
+                ui.card(ui.card_header("Share"), output_widget("origin_share")),
+                col_widths=[7, 5],
+            ),
+            class_="question-block",
+        ),
+        chart_row("Estimated spend by provider", "provider_total", "provider_share"),
     )
 
 

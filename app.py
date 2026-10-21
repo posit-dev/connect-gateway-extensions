@@ -248,6 +248,7 @@ DISPLAY_FMT = {
     "conversations": lambda v: f"{v:,.0f}",
     "cache_hit_pct": lambda v: f"{v:,.0f}%",
     "peak_input": fmt_num,
+    "peak_p75": lambda v: f"{v:,.0f}",
 }
 
 
@@ -487,7 +488,6 @@ def server(input, output, session):
         "preset",
         "date_range",
         "attr_kind",
-        "attr_order",
         "pf_kind",
         "pf_pick",
         "grain",
@@ -573,16 +573,16 @@ def server(input, output, session):
                             COALESCE(SUM({est_cost()}),0) est
                      FROM gateway_events WHERE {where(f)}""").iloc[0]
         return ui.div(
-            ui.span(f"{int(r.users):,} {plural(r.users, 'user')}", class_="pill pill-blue"),
+            ui.span(f"{int(r.users):,} {plural(r.users, 'user')}", class_="pill"),
             ui.span(
                 f"{int(r.contents):,} content {plural(r.contents, 'item')}",
-                class_="pill pill-purple",
+                class_="pill",
             ),
             ui.span(
                 f"{int(r.sessions):,} {plural(r.sessions, 'session')}",
-                class_="pill pill-amber",
+                class_="pill",
             ),
-            ui.span(f"{card_usd(r.est)} est. spend", class_="pill pill-green"),
+            ui.span(f"{card_usd(r.est)} est. spend", class_="pill"),
             unpriced_pill(),
             class_="topbar-right",
         )

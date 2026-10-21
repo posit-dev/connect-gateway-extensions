@@ -63,8 +63,8 @@ CONV_HIGH_PCT = HIGH_PCT
 COMPACT_AT = 100_000
 # What the conversation spend chart can group by.
 CONV_BY = {
-    "model": "Model", "duration": "Duration", "turns": "Turns",
-    "pace": "Pace", "cache": "Cache hit", "context": "Peak context", "tool": "Tool",
+    "context": "Peak context", "model": "Model", "duration": "Duration", "turns": "Turns",
+    "pace": "Pace", "cache": "Cache hit", "tool": "Harness",
 }
 # The model view names this many models and folds the rest into "other".
 CONV_BY_MODELS = 7
@@ -178,7 +178,7 @@ def conv_keys(df: pd.DataFrame, by: str) -> tuple[pd.Series, list[str]]:
         key = key.where(key.isin(keep), "other")
         order = [m for m in ranked if m in keep] + (["other"] if len(ranked) > len(keep) else [])
     elif by == "tool":
-        # The tool most of the conversation's spend came through, read from the
+        # The harness most of the conversation's spend came through, read from the
         # User-Agent. No header is its own group, not a guess.
         key = df.main_tool.fillna("(no user agent)").replace("", "(no user agent)")
         ranked = df.groupby(key).est.sum().sort_values(ascending=False).index
@@ -226,7 +226,7 @@ def conv_groups(df: pd.DataFrame, key: pd.Series, order: list[str]) -> pd.DataFr
 
 CONV_BY_AXIS = {
     "model": "model the conversation spent most on",
-    "tool": "tool the conversation spent most through (from User-Agent)",
+    "tool": "harness the conversation spent most through (from User-Agent)",
     "duration": "first to last request",
     "turns": "requests in the conversation",
     "pace": "typical pause between requests (median)",

@@ -1,4 +1,4 @@
-"""Adoption page: active users, tool activity, and usage patterns.
+"""Adoption page: active users, harness activity, and usage patterns.
 
 Preserves the public input/output IDs and registers its CSV export.
 """
@@ -51,7 +51,7 @@ def panel():
         ui.card(
             ui.card_header(
                 ui.div(
-                    ui.span("Tools over time"),
+                    ui.span("Harnesses over time"),
                     ui.div(
                         ui.input_radio_buttons(
                             "tool_grain",
@@ -211,7 +211,7 @@ def server(input, ctx: PageContext):
 
     @render_widget
     def tool_time():
-        """Distinct active users per tool, per day, week or month."""
+        """Distinct active users per harness, per day, week or month."""
         f, grain = flt(), input.tool_grain() or "week"
         df = usage.q(f"""SELECT date_trunc('{grain}', day)::DATE AS b, tool AS k,
                                 COUNT(DISTINCT username) AS users, COUNT(*) AS requests
@@ -219,7 +219,7 @@ def server(input, ctx: PageContext):
                          WHERE {where(f)} AND tool IS NOT NULL AND username IS NOT NULL
                          GROUP BY 1, 2 ORDER BY 1""")
         if df.empty:
-            return empty_fig(f["mode"], "No tool activity in this view")
+            return empty_fig(f["mode"], "No harness activity in this view")
         order = df.groupby("k").users.sum().sort_values(ascending=False).index.tolist()
         fig = go.Figure()
         for k in order:

@@ -397,7 +397,13 @@ def panel():
                 class_="seg",
             ),
             ui.div(
-                ui.input_selectize("pf_pick", None, {}, options={"placeholder": "pick one\u2026"}),
+                # input_select, not input_selectize: the latter restores a bookmarked
+                # value as the *choices* and crashes the page on reload. The choices
+                # are filled in by the server (`_choices`).
+                ui.input_select(
+                    "pf_pick", None, {}, selectize=True,
+                    options={"placeholder": "pick one\u2026"},
+                ),
                 class_="pf-pick",
             ),
             ui.span("ranked by estimated spend in view", class_="page-switch-note"),
@@ -474,7 +480,7 @@ def panel():
                             ui.span(ui.output_text("pf_conv_chart_title", inline=True)),
                             ui.div(
                                 ui.input_radio_buttons(
-                                    "pf_conv_by", None, conv_tools.CONV_BY, selected="model",
+                                    "pf_conv_by", None, conv_tools.CONV_BY, selected="context",
                                     inline=True,
                                 ),
                                 class_="seg",
@@ -646,10 +652,8 @@ def server(input, ctx: PageContext, records_sql):
             else:
                 note = versus_org(
                     mine, line, card_num,
-                    "Peak context is the largest input, cached and uncached "
-                    "together, any request in a conversation sent. A high one "
-                    "means the conversation was kept going instead of restarted. "
-                    f"Typical: the p{HIGH_PCT:g} across every conversation in view, "
+                    "Peak context is the largest input any request in a conversation sent. "
+                    f"Typical: the p{HIGH_PCT:g} across every conversation "
                     "in tokens.")
             ctx = theme.stat_tile(f"Peak context (p{HIGH_PCT:g})", card_num(mine), note)
         return ui.layout_columns(
@@ -751,7 +755,7 @@ def server(input, ctx: PageContext, records_sql):
 
     @reactive.calc
     def conv_by() -> str:
-        return input.pf_conv_by() or "model"
+        return input.pf_conv_by() or "context"
 
     @reactive.calc
     def conv_grouped() -> SimpleNamespace:

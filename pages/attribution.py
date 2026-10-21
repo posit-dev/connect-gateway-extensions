@@ -15,6 +15,7 @@ from shinywidgets import output_widget
 import theme
 import usage
 from pages.context import PageContext
+from conversations import HIGH_PCT
 from filters import TOKEN_COUNT
 from table_format import GUID_LABEL_CHARS, pretty_columns
 from theme import apply, card_num, empty_fig, fmt_usd, render_widget
@@ -37,30 +38,41 @@ def panel():
                 ),
                 class_="seg",
             ),
-            ui.span("Order by", class_="strip-label"),
-            ui.div(
-                ui.input_radio_buttons(
-                    "attr_order",
-                    None,
-                    {"spend": "Spend", "type": "Type"},
-                    selected="spend",
-                    inline=True,
-                ),
-                class_="seg",
-            ),
             class_="page-switch",
         ),
         ui.output_ui("attr_kpis"),
-        ui.layout_columns(
-            ui.card(
-                ui.card_header("Top 20 by estimated spend"),
-                output_widget("attr_bars"),
+        ui.card(
+            ui.card_header(
+                ui.div(
+                    ui.span("Top 20 by"),
+                    ui.div(
+                        ui.input_radio_buttons(
+                            "attr_metric",
+                            None,
+                            {
+                                "peak": "Peak context",
+                                "spend": "Estimated spend",
+                                "rate": "Cost per request",
+                            },
+                            selected="peak",
+                            inline=True,
+                        ),
+                        class_="seg",
+                    ),
+                    help_icon(
+                        ui.p(
+                            ui.strong("Peak context"),
+                            " is the largest raw input token count in each conversation "
+                            "(cached and uncached tokens counted alike, so caching does not "
+                            f"change it). The bar shows the p{HIGH_PCT:g} of those peaks across "
+                            "that user's, content's or session's conversations.",
+                            class_="mb-0",
+                        ),
+                    ),
+                    class_="hdr-flex-left",
+                )
             ),
-            ui.card(
-                ui.card_header("Top 20 by estimated cost per request"),
-                output_widget("attr_rate_bars"),
-            ),
-            col_widths=[6, 6],
+            output_widget("attr_bars"),
         ),
         ui.card(
             ui.card_header("Outliers: requests against estimated spend"),
@@ -84,7 +96,8 @@ def server(input, ctx: PageContext, open_profile):
     # per request, is above the third quartile by more than 1.5 times the
     # interquartile range, and at least twice the median. Too few rows of a kind
     # make a quartile meaningless, so under this many nothing of that kind is
-    # flagged.
+    # flagged. Peak context (the p75 of each conversation's largest input) is a third
+    # measure, judged the same way.
     OUTLIER_MIN_N = 8
     KIND_LABEL = {"user": "user", "content": "content", "session": "session"}
     # What can be ranked: the column that identifies it, and what to call it. A
@@ -146,7 +159,17 @@ def server(input, ctx: PageContext, open_profile):
                          WHERE {where(f)} AND {dim} IS NOT NULL AND {dim} <> ''
                          GROUP BY 1 HAVING SUM({est_cost()}) > 0""")
         df.insert(0, "kind", kind)
-        return df
+        # Joe's measure: the largest input of each conversation, then a percentile
+        # of those across the principal's conversations.
+        peaks = usage.q(f"""SELECT k, quantile_cont(peak, {HIGH_PCT / 100}) AS peak_p75,
+                                   COUNT(*) AS conversations
+                            FROM (SELECT {dim} AS k, MAX(input_tokens) AS peak
+                                  FROM gateway_events
+                                  WHERE {where(f)} AND {dim} IS NOT NULL AND {dim} <> ''
+                                        AND conversation_id IS NOT NULL
+                                  GROUP BY {dim}, conversation_id)
+                            GROUP BY k""")
+        return df.merge(peaks, on="k", how="left")
 
     @reactive.calc
     def attr_df() -> pd.DataFrame:
@@ -156,7 +179,7 @@ def server(input, ctx: PageContext, open_profile):
         if not parts:
             return pd.DataFrame(
                 columns=["kind", "k", "spend", "requests", "tokens", "label", "detail",
-                         "per_request", "x_median", "why"]
+                         "per_request", "peak_p75", "conversations", "x_median", "why"]
             )
         df = pd.concat(parts, ignore_index=True)
         for col in ("session_name", "owner", "team"):
@@ -166,12 +189,6 @@ def server(input, ctx: PageContext, open_profile):
         df = uniquify(df)
         df["detail"] = [principal_detail(r) for r in df.itertuples()]
         df = df.sort_values("spend", ascending=False, ignore_index=True)
-        if input.attr_order() == "type":
-            order = {k: i for i, (_, k) in enumerate(PRINCIPAL_KINDS)}
-            df = df.sort_values(
-                ["kind", "spend"], key=lambda s: s.map(order) if s.name == "kind" else -s,
-                ignore_index=True,
-            )
         df["per_request"] = df.spend / df.requests
         df["x_median"] = 0.0
         df["why"] = ""
@@ -188,12 +205,16 @@ def server(input, ctx: PageContext, open_profile):
             for col, label in [
                 ("spend", "high estimated spend"),
                 ("per_request", "high estimated cost per request"),
+                ("peak_p75", "high peak context"),
             ]:
+                vals = part[col].dropna()
+                if len(vals) < OUTLIER_MIN_N:
+                    continue
                 # A ufunc on a Series returns a Series; the stubs only say ndarray.
-                lg = cast(pd.Series, np.log10(part[col]))
+                lg = cast(pd.Series, np.log10(vals))
                 q1, q3 = lg.quantile(0.25), lg.quantile(0.75)
-                material = part[col] >= 2 * part[col].median()
-                for i in rows[((lg > q3 + 1.5 * (q3 - q1)) & material).to_numpy()]:
+                material = vals >= 2 * vals.median()
+                for i in vals.index[((lg > q3 + 1.5 * (q3 - q1)) & material).to_numpy()]:
                     why[i].append(label)
             df.loc[rows, "why"] = [" + ".join(why[i]) for i in rows]
         return df
@@ -225,8 +246,9 @@ def server(input, ctx: PageContext, open_profile):
                 help=help_icon(
                     "How outliers are flagged",
                     ui.p(
-                        "Flagged when total estimated spend, or spend per request, is "
-                        "unusually high compared with the others in the list.",
+                        "Flagged when total estimated spend, spend per request, or peak "
+                        "context is unusually high compared with the others of the same "
+                        "kind.",
                         class_="mb-0",
                     ),
                 ),
@@ -242,17 +264,13 @@ def server(input, ctx: PageContext, open_profile):
         return t["series"][{"user": 0, "content": 1, "session": 2}[kind]]
 
     def rank_bars(f, df, col: str, flag: str, fmt, axis: str):
-        """Top 20 by one measure. Red marks the rows flagged on that measure only."""
+        """Top 20 by one measure. Red marks the rows flagged on that measure only
+        (`flag` is the reason text for that measure)."""
         t = theme.TOKENS[f["mode"]]
-        ranked = df.sort_values(col, ascending=False)
-        if input.attr_order() == "type":
-            # Grouped: each kind gets its own block, best first within it.
-            kinds = [k for _, k in PRINCIPAL_KINDS if (ranked.kind == k).any()]
-            per = max(5, 20 // max(len(kinds), 1))
-            top = pd.concat([ranked[ranked.kind == k].head(per) for k in kinds])
-        else:
-            top = ranked.head(20)
-        top = top.iloc[::-1]  # plotly draws the first row at the bottom
+        ranked = df.dropna(subset=[col]).sort_values(col, ascending=False)
+        if ranked.empty:
+            return empty_fig(f["mode"], "No conversations in this view")
+        top = ranked.head(20).iloc[::-1]  # plotly draws the first row at the bottom
         fig = go.Figure()
         for kind in [k for _, k in PRINCIPAL_KINDS]:
             d = top[top.kind == kind]
@@ -266,7 +284,8 @@ def server(input, ctx: PageContext, open_profile):
                 width=0.6,
                 marker={
                     "color": [
-                        t["series"][7] if flag in w else _kind_color(t, kind) for w in d.why
+                        t["series"][7] if flag in w else _kind_color(t, kind)
+                        for w in d.why
                     ]
                 },
                 text=["\u00a0\u00a0" + fmt(v) for v in d[col]],
@@ -288,17 +307,18 @@ def server(input, ctx: PageContext, open_profile):
         f, df = flt(), attr_df()
         if df.empty:
             return empty_fig(f["mode"], "No estimated spend in this view")
+        metric = input.attr_metric() or "peak"
+        if metric == "rate":
+            return rank_bars(
+                f, df, "per_request", "cost per request", lambda v: f"${v:,.4f}",
+                "est. USD per request",
+            )
+        if metric == "peak":
+            return rank_bars(
+                f, df, "peak_p75", "high peak context", lambda v: f"{v:,.0f}",
+                f"peak context, p{HIGH_PCT:g} of conversations (tokens)",
+            )
         return rank_bars(f, df, "spend", "high estimated spend", fmt_usd, "est. USD")
-
-    @render_widget
-    def attr_rate_bars():
-        f, df = flt(), attr_df()
-        if df.empty:
-            return empty_fig(f["mode"], "No estimated spend in this view")
-        return rank_bars(
-            f, df, "per_request", "cost per request", lambda v: f"${v:,.4f}",
-            "est. USD per request",
-        )
 
     @render_widget
     def attr_scatter():
@@ -354,7 +374,8 @@ def server(input, ctx: PageContext, open_profile):
     def attr_out_df() -> pd.DataFrame:
         df = attr_df()
         out = df[df.why != ""][
-            ["kind", "label", "detail", "why", "spend", "requests", "per_request", "x_median", "tokens"]
+            ["kind", "label", "detail", "why", "spend", "requests", "per_request", "peak_p75",
+             "x_median", "tokens"]
         ]
         # The detail column only earns its place when something fills it (sessions).
         if not (out.detail != "").any():
@@ -381,7 +402,7 @@ def server(input, ctx: PageContext, open_profile):
     ctx.register_export(
         "attr",
         lambda: attr_df()[
-            ["kind", "k", "label", "detail", "why", "spend", "requests", "per_request", "x_median", "tokens"]
+            ["kind", "k", "label", "detail", "why", "spend", "requests", "per_request", "x_median", "tokens", "peak_p75"]
         ].rename(columns={"k": "id", "label": "name", "spend": "est_spend_usd"}),
         "attribution.csv",
     )

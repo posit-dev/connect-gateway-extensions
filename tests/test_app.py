@@ -31,7 +31,7 @@ def test_ui_has_every_page_and_output(loaded):
         "models_bars", "models_adoption", "cache_savings_time", "latency_time",
         "errors_time", "models_table", "dl_adoption", "dl_models",
         "records_table", "records_title", "records_capped", "dl_records",
-        "attr_kind", "attr_order", "attr_kpis", "attr_bars", "attr_rate_bars",
+        "attr_kind", "attr_kpis", "attr_bars", "attr_metric",
         "attr_scatter", "attr_table", "dl_attr",
         "conv_kpis", "conv_by", "conv_spend_by", "conv_spend_note",
         "conv_detail", "top_sessions", "dl_conversations",

@@ -55,19 +55,19 @@ def make_ctx(f):
 
 
 def test_attribution_ranking_and_export(loaded, f, make_ctx):
-    def attribution_export(attr_order: str):
+    def attribution_export():
         ctx, exports = make_ctx()
-        inputs = SimpleNamespace(attr_kind=lambda: "all", attr_order=lambda: attr_order)
+        inputs = SimpleNamespace(attr_kind=lambda: "all")
         attribution.server(inputs, ctx, lambda kind, key: None)
         with reactive.isolate():
             return exports, exports["attr"][0]()
 
-    exports, df = attribution_export("spend")
+    exports, df = attribution_export()
     assert list(exports) == ["attr"]
     assert exports["attr"][1] == "attribution.csv"
     assert df.columns.tolist() == [
         "kind", "id", "name", "detail", "why", "est_spend_usd", "requests",
-        "per_request", "x_median", "tokens",
+        "per_request", "x_median", "tokens", "peak_p75",
     ]
     assert set(df.kind) == {"user", "content", "session"}
     assert (df.est_spend_usd > 0).all()
@@ -79,10 +79,6 @@ def test_attribution_ranking_and_export(loaded, f, make_ctx):
         GROUP BY username HAVING SUM({pricing.est_cost()}) > 0)""")
     assert users.est_spend_usd.sum() == pytest.approx(user_spend)
     assert users.id.tolist() == users.name.tolist()
-
-    _, grouped = attribution_export("type")
-    assert grouped.kind.drop_duplicates().tolist() == ["user", "content", "session"]
-    assert len(grouped.kind.ne(grouped.kind.shift()).cumsum().unique()) == 3
 
 
 def test_conversations_export_and_unpriced_exclusion(loaded, f, make_ctx):
