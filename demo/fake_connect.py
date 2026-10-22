@@ -52,6 +52,15 @@ DAYS = 30  # the dashboard loads 30 days, so generate exactly that
 # Enough rows that the Overview's 2,000-row table cap is visibly a cap.
 ROWS = int(os.environ.get("FAKE_ROWS", 160000))
 
+# "full" (the default) sends everything a current Connect and Workbench send.
+# "sparse" is a server whose callers send no User-Agent and no Gateway-Metadata,
+# with almost all traffic outside content: so no harness, no Workbench session,
+# and an origin only on content rows. That is what a real customer server can
+# look like, and it is where empty charts and zero-divisions show up.
+PROFILE = os.environ.get("FAKE_PROFILE", "full")
+if PROFILE not in ("full", "sparse"):
+    raise SystemExit(f"FAKE_PROFILE must be full or sparse, not {PROFILE!r}")
+
 # The most rows one page of a paged list holds, whatever page_size asks for.
 # Connect caps page_size too; the tests set a small cap so that reading groups
 # and their members has to follow several pages.
@@ -179,7 +188,7 @@ def make_rows(n: int = ROWS) -> pd.DataFrame:
         t = now - timedelta(days=day, seconds=random.randint(0, 86399))
         t = t.replace(hour=int(random.gauss(14, 4)) % 24)
         provider, model, _ = random.choices(MODELS, weights)[0]
-        from_content = random.random() < 0.55
+        from_content = random.random() < (0.02 if PROFILE == "sparse" else 0.55)
         content_i = random.choices(range(len(CONTENT)), CONTENT_W)[0] if from_content else None
         mult = CONTENT_TOKEN_X.get(content_i, 1) if content_i is not None else 1
         # A content item either acts for its viewer or runs on its owner's
@@ -196,6 +205,9 @@ def make_rows(n: int = ROWS) -> pd.DataFrame:
         context = int(random.lognormvariate(8, 1.1)) * mult
         user_agent, origin = pick_client(from_content)
         meta = None if from_content else workbench_metadata(ui, day)
+        if PROFILE == "sparse":
+            user_agent, meta = None, None
+            origin = "connect" if from_content else None
         job = uuid.uuid4().hex[:6] if from_content else None
         caches = content_i not in CONTENT_NO_CACHE
         # How much of the context the provider holds in its prompt cache, and

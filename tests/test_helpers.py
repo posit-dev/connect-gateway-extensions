@@ -325,7 +325,13 @@ def test_pred_is_evaluable_sql_that_cannot_be_escaped(kind):
 # ---- theme formatters -----------------------------------------------------------
 @pytest.mark.parametrize("v, usd, num, card_u, card_n", [
     (None, "\u2013", "\u2013", "\u2013", "\u2013"),
+    # An empty SUM or mean (NaN) and a ratio over zero (inf) are no figure, not "nan".
+    (float("nan"), "\u2013", "\u2013", "\u2013", "\u2013"),
+    (float("inf"), "\u2013", "\u2013", "\u2013", "\u2013"),
     (0, "$0.00", "0", "$0", "0"),
+    # Spend under a cent is still spend; under a dollar the tile keeps the cents.
+    (0.00004, "<$0.01", "0", "<$0.01", "0"),
+    (0.42, "$0.42", "0", "$0.42", "0"),
     (12.345, "$12.35", "12", "$12", "12"),
     (99.994, "$99.99", "100", "$100", "100"),
     (100, "$100", "100", "$100", "100"),
@@ -343,6 +349,61 @@ def test_number_formatters(v, usd, num, card_u, card_n):
 def test_negative_numbers_use_magnitude_for_the_unit():
     assert theme.fmt_usd(-20_000) == "$-20.0k"
     assert theme.fmt_num(-2_000_000) == "-2.0M"
+
+
+def test_fmt_pct_dashes_a_missing_share():
+    assert theme.fmt_pct(12.345, 1) == "12.3%"
+    assert theme.fmt_pct(float("nan")) == "\u2013"
+    assert theme.fmt_pct(None) == "\u2013"
+
+
+# ---- chart categories -------------------------------------------------------------
+def test_null_origin_and_harness_are_named_buckets():
+    import filters
+
+    assert filters.dim_sql("source") == "COALESCE(source, '(unidentified)')"
+    assert filters.dim_sql("tool") == "COALESCE(tool, '(no user agent)')"
+    assert filters.dim_sql("model") == "model"  # other columns are left alone
+    with duckdb.connect() as db:
+        got = db.sql(f"SELECT {filters.dim_sql('source')} FROM "
+                     "(VALUES ('connect'), (NULL)) t(source)").fetchall()
+    assert [r[0] for r in got] == ["connect", "(unidentified)"]
+
+
+@pytest.mark.parametrize("mode", ["dark", "light"])
+def test_unknown_buckets_are_gray(mode):
+    muted = theme.TOKENS[mode]["muted"]
+    for kind, name in [("origin", "(unidentified)"), ("tool", "(no user agent)")]:
+        assert theme.color(kind, name, mode) == muted
+    assert theme.color("origin", "connect", mode) != muted
+
+
+@pytest.mark.parametrize("mode", ["dark", "light"])
+def test_heatmap_scale_starts_empty_and_ends_strongest(mode):
+    scale = theme.seq_colorscale(mode)
+    # Zero is the grid colour, so an empty hour reads as nothing.
+    assert scale[0] == [0.0, theme.TOKENS[mode]["grid"]]
+    assert scale[-1][0] == pytest.approx(1.0)
+    stops = [s for s, _ in scale]
+    assert stops == sorted(stops) and len(set(stops)) == len(stops)
+    # The top of the scale is the ramp's strongest end in either mode.
+    assert scale[-1][1] == theme.TOKENS[mode]["seq"][-1]
+
+
+def test_empty_fig_wraps_a_long_reason():
+    fig = theme.empty_fig("dark", "word " * 40)
+    assert "<br>" in fig.layout.annotations[0].text
+
+
+# ---- conversations with nothing in view -------------------------------------------
+def test_conv_groups_of_no_conversations_still_make_a_table():
+    """A principal with no conversations in view (one day, say) crashed the table."""
+    empty = pd.DataFrame(columns=["est", "high"])
+    groups = conversations.conv_groups(empty, pd.Series(dtype=object), [])
+    table = conversations.conv_group_table(groups)
+    assert table.empty
+    assert "higher_cost_conversations" in table.columns
+    assert conversations.conv_spend_fig(groups, "model", "dark", 75).layout.annotations
 
 
 # ---- table_format.pretty_columns --------------------------------------------------

@@ -62,6 +62,12 @@ the app exits. The mock serves the same four routes the app reads from Connect:
 - the price overrides, which are empty
 - the content list
 
+`FAKE_PROFILE=sparse just run-local` makes the mock look like a server whose
+callers send no User-Agent and no Gateway-Metadata, with almost all traffic
+outside content: no harness, no Workbench session, and an origin only on content
+rows. Real servers can look like this, and it is the case the origin, harness and
+session views have to handle without going blank (`tests/test_sparse.py`).
+
 Like Connect, the mock wants an API key on every request. Models the catalog
 does not price cost $0 against either backend; the mock's `gpt-5` traffic is
 one such model.

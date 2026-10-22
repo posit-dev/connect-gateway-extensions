@@ -38,6 +38,30 @@ def panel():
                 ),
                 class_="seg",
             ),
+            # Every user and every content item with its spend, for an admin to
+            # take into another tool. Not tied to the Show toggle or the outliers.
+            ui.div(
+                ui.download_button(
+                    "dl_principal_spend", "Export spend by principal",
+                    class_="btn-sm export-btn",
+                ),
+                help_icon(
+                    "Spend by principal",
+                    ui.p(
+                        "A CSV with one row per user and one per content item in "
+                        "view: its kind (user or content), id, name, requests, "
+                        "tokens and estimated spend, largest first. It follows the "
+                        "date range and filters."
+                    ),
+                    ui.p(
+                        "A request from content is charged to both the content item "
+                        "and a user, so the user rows and the content rows each add "
+                        "up to their own total; do not add the two together.",
+                        class_="mb-0",
+                    ),
+                ),
+                class_="hdr-flex-left ms-auto",
+            ),
             class_="page-switch",
         ),
         ui.output_ui("attr_kpis"),
@@ -229,6 +253,9 @@ def server(input, ctx: PageContext, open_profile):
         flagged = out.kind.value_counts()
 
         def part(kind: str, label: str, noun: str) -> ui.Tag:
+            if kind == "session" and not ctx.cat()["session_labels"]:
+                # Not "0 of 0": Workbench is not sending session ids at all.
+                return theme.stat_tile(label, "\u2013", "sessions not reported by Workbench")
             have, bad = int(n.get(kind, 0)), int(flagged.get(kind, 0))
             return theme.stat_tile(
                 label,
@@ -272,14 +299,24 @@ def server(input, ctx: PageContext, open_profile):
             return empty_fig(f["mode"], "No conversations in this view")
         top = ranked.head(20).iloc[::-1]  # plotly draws the first row at the bottom
         fig = go.Figure()
-        for kind in [k for _, k in PRINCIPAL_KINDS]:
+        kinds = [k for _, k in PRINCIPAL_KINDS if (top.kind == k).any()]
+        flagged = any(flag in w for w in top.why)
+        # The legend gets entries of its own: a bar trace's swatch is its first
+        # bar's colour, so a flagged first bar showed "content" in outlier red.
+        # Each is a zero-length bar on a row that exists, so the axis stays
+        # categorical and nothing is drawn.
+        anchor = dict(x=[0], y=[top.label.iloc[-1]], orientation="h", hoverinfo="skip")
+        for kind in kinds if len(kinds) > 1 or flagged else []:
+            fig.add_bar(**anchor, name=KIND_LABEL[kind], marker={"color": _kind_color(t, kind)})
+        if flagged:
+            fig.add_bar(**anchor, name="outlier", marker={"color": t["series"][7]})
+        for kind in kinds:
             d = top[top.kind == kind]
-            if d.empty:
-                continue
             fig.add_bar(
                 x=d[col],
                 y=d.label,
                 name=KIND_LABEL[kind],
+                showlegend=False,
                 orientation="h",
                 width=0.6,
                 marker={
@@ -295,12 +332,13 @@ def server(input, ctx: PageContext, open_profile):
                 hoverinfo="none",  # the name follows the mouse; see nametip
             )
         fig.update_layout(meta="nametip", barmode="overlay")
-        fig.update_yaxes(categoryorder="array", categoryarray=list(top.label))
+        fig.update_yaxes(type="category", categoryorder="array", categoryarray=list(top.label))
         fig.update_xaxes(range=[0, top[col].max() * 1.25], title_text=axis)
-        return apply(
+        apply(
             fig, f["mode"], height=max(260, 24 * len(top) + 70),
-            showlegend=top.kind.nunique() > 1, hover=True,
+            showlegend=len(kinds) > 1 or flagged, hover=True,
         )
+        return theme.usd_axis(fig) if col == "spend" else fig
 
     @render_widget
     def attr_bars():
@@ -398,6 +436,40 @@ def server(input, ctx: PageContext, open_profile):
         if rows:
             r = attr_df()[lambda d: d.why != ""].iloc[rows[0]]
             open_profile(r.kind, r.k)
+
+    def principal_spend_df() -> pd.DataFrame:
+        """One row per user and per content item in view, with its spend.
+
+        Unpriced traffic is kept (spend $0, requests counted): the point is a
+        complete list, not only the ones with a price.
+        """
+        f = flt()
+        parts = []
+        for dim, kind, extra in [
+            ("username", "user", "MAX(user_email)"),
+            ("content_guid", "content", "MAX(content_owner_username)"),
+        ]:
+            df = usage.q(f"""SELECT {dim} AS id, {extra} AS detail, COUNT(*) AS requests,
+                                    COALESCE(SUM({TOKEN_COUNT}), 0) AS tokens,
+                                    COALESCE(SUM({est_cost()}), 0) AS est_spend_usd
+                             FROM gateway_events
+                             WHERE {where(f)} AND {dim} IS NOT NULL AND {dim} <> ''
+                             GROUP BY 1""")
+            df.insert(0, "kind", kind)
+            df.insert(2, "name", [
+                str(i) if kind == "user" else (usage.content_name(i) or "")
+                for i in df.id
+            ])
+            # What the second column means depends on the kind.
+            df = df.rename(columns={"detail": "email" if kind == "user" else "owner"})
+            parts.append(df)
+        cols = ["kind", "id", "name", "email", "owner", "requests", "tokens", "est_spend_usd"]
+        out = pd.concat(parts, ignore_index=True).reindex(columns=cols)
+        out["est_spend_usd"] = out.est_spend_usd.round(4)
+        return out.sort_values(["est_spend_usd", "requests"], ascending=False,
+                               ignore_index=True)
+
+    ctx.register_export("principal_spend", principal_spend_df, "spend_by_principal.csv")
 
     ctx.register_export(
         "attr",

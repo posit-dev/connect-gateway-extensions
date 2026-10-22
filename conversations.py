@@ -214,7 +214,11 @@ def conv_groups(df: pd.DataFrame, key: pd.Series, order: list[str]) -> pd.DataFr
     """Totals per group, then the same split by the higher-cost flag (spend_hi,
     n_hi for flagged conversations; spend_lo, n_lo for the rest)."""
     if df.empty:
-        return pd.DataFrame(columns=["label", "spend", "n"])
+        # Every column the chart and table read, so a principal with no
+        # conversations in view gets an empty table rather than an error.
+        return pd.DataFrame(
+            columns=["label", "spend", "n", "spend_hi", "n_hi", "spend_lo", "n_lo"]
+        )
     hi = df.high.astype(bool)
     g = df.groupby(key).agg(spend=("est", "sum"), n=("est", "size"))
     for suffix, part in (("hi", df[hi]), ("lo", df[~hi])):

@@ -12,6 +12,22 @@ def sql_str(x: str) -> str:
     return "'" + str(x).replace("'", "''") + "'"
 
 
+# What a chart calls a row whose origin or harness is NULL. Connect sets origin
+# only for content, or for a Posit client that names its host IDE in the
+# User-Agent; Claude Code, Copilot and any caller that sends no User-Agent get
+# none. Dropping those rows made the origin and harness totals smaller than the
+# spend they claimed to break down, so they get a named bucket of their own.
+UNIDENTIFIED = "(unidentified)"
+NO_USER_AGENT = "(no user agent)"
+NULL_LABEL = {"source": UNIDENTIFIED, "tool": NO_USER_AGENT}
+
+
+def dim_sql(dim: str) -> str:
+    """SQL for a chart category: the column, with NULL named where it means something."""
+    label = NULL_LABEL.get(dim)
+    return f"COALESCE({dim}, {sql_str(label)})" if label else dim
+
+
 def meta_expr(key: str) -> str:
     """SQL for one metadata key's value, as text."""
     path = '$."' + key.replace('"', '\\"') + '"'

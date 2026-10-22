@@ -11,11 +11,18 @@ from shinywidgets import output_widget
 
 import theme
 import usage
+from filters import dim_sql
 from pages.context import PageContext
 from theme import apply, card_num, color, empty_fig, render_widget
 from ui_shell import empty_note, help_icon, page_header, plural, table_header
 
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+# The rolling-window columns, named in full: readers did not know the acronyms.
+ACTIVE_NAMES = {
+    "dau": "daily active users",
+    "wau": "weekly active users",
+    "mau": "monthly active users",
+}
 
 
 def panel():
@@ -23,6 +30,8 @@ def panel():
         "Adoption",
         page_header(
             "Adoption",
+            "People, not content: a request from Connect content counts for the user "
+            "it was charged to, the viewer or the content's owner.",
             help=help_icon(
                 "What counts as active?",
                 ui.p(
@@ -31,14 +40,14 @@ def panel():
                     "rolling window ending on that day:"
                 ),
                 ui.tags.ul(
-                    ui.tags.li("DAU (Daily Active Users): that day only."),
-                    ui.tags.li("WAU (Weekly Active Users): that day and the 6 before it."),
-                    ui.tags.li("MAU (Monthly Active Users): that day and the 29 before it."),
+                    ui.tags.li("Daily active users: that day only."),
+                    ui.tags.li("Weekly active users: that day and the 6 before it."),
+                    ui.tags.li("Monthly active users: that day and the 29 before it."),
                 ),
                 ui.p(
                     "Windows can reach back before the first day on the "
                     "chart, but never before the loaded data, so the first "
-                    "weeks of WAU and MAU are understated.",
+                    "weeks of the weekly and monthly counts are understated.",
                     class_="mb-0",
                 ),
             ),
@@ -132,24 +141,24 @@ def server(input, ctx: PageContext):
         avg_dau = df.dau.mean()
         return ui.layout_columns(
             theme.stat_tile(
-                "Avg DAU",
+                "Avg daily active users",
                 f"{avg_dau:,.1f}",
                 f"daily average over {len(df)} {plural(len(df), 'day')}",
                 help=help_icon(
-                    "DAU = Daily Active Users",
+                    "Average daily active users",
                     ui.p(
-                        "Avg DAU is the average number of active users per day. On a "
+                        "The average number of active users per day. On a "
                         "typical day, this many people used the gateway.",
                         class_="mb-0",
                     ),
                 ),
             ),
             theme.stat_tile(
-                "WAU",
+                "Weekly active users",
                 card_num(last.wau),
                 f"7 days to {last.day:%b %d}",
                 help=help_icon(
-                    "WAU = Weekly Active Users",
+                    "Weekly active users",
                     ui.p(
                         "How many different people used the gateway in the last 7 days.",
                         class_="mb-0",
@@ -157,11 +166,11 @@ def server(input, ctx: PageContext):
                 ),
             ),
             theme.stat_tile(
-                "MAU",
+                "Monthly active users",
                 card_num(last.mau),
                 f"30 days to {last.day:%b %d}",
                 help=help_icon(
-                    "MAU = Monthly Active Users",
+                    "Monthly active users",
                     ui.p(
                         "How many different people used the gateway in the last "
                         "30 days.",
@@ -172,11 +181,12 @@ def server(input, ctx: PageContext):
             theme.stat_tile(
                 "Stickiness",
                 f"{100 * avg_dau / last.mau:,.0f}%" if last.mau else "\u2013",
-                "avg DAU / MAU",
+                "daily \u00f7 monthly active users",
                 help=help_icon(
-                    "Stickiness = avg DAU / MAU",
+                    "Stickiness",
                     ui.p(
-                        "Of the people who used the gateway this month, the share "
+                        "Average daily active users divided by monthly active users: "
+                        "of the people who used the gateway this month, the share "
                         "who show up on a typical day.",
                         class_="mb-0",
                     ),
@@ -191,7 +201,7 @@ def server(input, ctx: PageContext):
         df = adoption_df().copy()
         df["day"] = df.day.astype(str).str[:10]
         # Newest first: the day a reader is most likely looking for.
-        df = df.iloc[::-1]
+        df = df.iloc[::-1].rename(columns=ACTIVE_NAMES)
         return render.DataGrid(df, height="420px" if len(df) > 12 else None)
 
     @render_widget
@@ -201,7 +211,8 @@ def server(input, ctx: PageContext):
             return empty_fig(f["mode"], "No active users in this view")
         series = theme.TOKENS[f["mode"]]["series"]
         fig = go.Figure()
-        for col, name, c in [("dau", "DAU", series[0]), ("wau", "WAU", series[2]), ("mau", "MAU", series[1])]:
+        for col, c in [("dau", series[0]), ("wau", series[2]), ("mau", series[1])]:
+            name = ACTIVE_NAMES[col].capitalize()
             fig.add_scatter(
                 x=df.day, y=df[col], name=name, mode="lines",
                 line={"width": 2.5, "color": c},
@@ -214,10 +225,12 @@ def server(input, ctx: PageContext):
     def tool_time():
         """Distinct active users per harness, per day, week or month."""
         f, grain = flt(), input.tool_grain() or "week"
-        df = usage.q(f"""SELECT date_trunc('{grain}', day)::DATE AS b, tool AS k,
+        # Requests with no User-Agent are a line of their own: on a server whose
+        # callers send none, leaving them out made the chart look empty.
+        df = usage.q(f"""SELECT date_trunc('{grain}', day)::DATE AS b, {dim_sql("tool")} AS k,
                                 COUNT(DISTINCT username) AS users, COUNT(*) AS requests
                          FROM gateway_events
-                         WHERE {where(f)} AND tool IS NOT NULL AND username IS NOT NULL
+                         WHERE {where(f)} AND username IS NOT NULL
                          GROUP BY 1, 2 ORDER BY 1""")
         if df.empty:
             return empty_fig(f["mode"], "No harness activity in this view")
@@ -253,7 +266,8 @@ def server(input, ctx: PageContext):
         fig = go.Figure(
             go.Heatmap(
                 z=grid, x=[f"{h:02d}" for h in range(24)], y=WEEKDAYS,
-                colorscale=theme.seq_colorscale(f["mode"]), xgap=2, ygap=2,
+                # zmin 0, so an hour with nothing in it is the "empty" colour
+                colorscale=theme.seq_colorscale(f["mode"]), zmin=0, xgap=2, ygap=2,
                 colorbar={"thickness": 10, "outlinewidth": 0},
                 hovertemplate="%{y} %{x}:00 \u00b7 <b>" + fmt + "</b><extra></extra>",
             )
@@ -262,4 +276,10 @@ def server(input, ctx: PageContext):
         fig.update_xaxes(title_text="hour of day (UTC)", type="category")
         return apply(fig, f["mode"], height=320, showlegend=False, hover=True)
 
-    ctx.register_export("adoption", adoption_df, "adoption_active_users.csv")
+    ctx.register_export(
+        "adoption",
+        lambda: adoption_df().rename(
+            columns={k: v.replace(" ", "_") for k, v in ACTIVE_NAMES.items()}
+        ),
+        "adoption_active_users.csv",
+    )

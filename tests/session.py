@@ -48,6 +48,22 @@ class Reply:
                 if "updateQueryString" in m]
 
 
+def figure_traces(reply: Reply, output_id: str) -> list[dict]:
+    """The traces of the plotly figure a widget output was given.
+
+    The output's value names a widget model; the figure arrives separately, as
+    the state of a shinywidgets comm whose ident is that model's id.
+    """
+    model = reply.values[output_id]["model_id"]
+    for m in reply.messages:
+        opened = (m.get("custom") or {}).get("shinywidgets_comm_open")
+        if opened:
+            msg = json.loads(opened)
+            if msg.get("ident") == f"comm-{model}":
+                return msg["content"]["data"]["state"]["_data"]
+    raise AssertionError(f"no figure sent for {output_id}")
+
+
 def page_outputs(html: str) -> list[str]:
     """Every element id on the page: the outputs a browser would report visible."""
     return sorted(set(re.findall(r'\bid="([^"]+)"', html)))
@@ -152,6 +168,9 @@ def browser_inputs(html: str) -> dict[str, object]:
         r'data-value="([^"]+)"[^>]*class="nav-link active"[^>]*href="#tab-main_tabs-', html)
     inputs["main_tabs"] = active.group(1) if active else "Overview"
     inputs["dark_mode"] = "dark"
+    # The Principals picker starts empty and the server fills it; a browser
+    # reports the empty value, and without it the choices never load.
+    inputs["pf_pick"] = ""
     return inputs
 
 
@@ -159,5 +178,6 @@ def run(coro):
     return asyncio.run(coro)
 
 
-__all__ = ["Reply", "Session", "browser_inputs", "fetch_page", "open_session", "page_outputs", "run"]
+__all__ = ["Reply", "Session", "browser_inputs", "fetch_page", "figure_traces",
+           "open_session", "page_outputs", "run"]
 

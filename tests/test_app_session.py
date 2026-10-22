@@ -148,22 +148,47 @@ def test_spend_and_tokens_agree_across_pages(app_server, loaded, f, models):
         assert {r["model"] for r in by_model} == set(models)
 
 
+def test_refresh_reloads_in_the_background_and_says_so(app_server):
+    """The reload is an extended task: the button reports busy, then the new data."""
+    async def scenario(session: Session, first: Reply, html: str):
+        reply = await session.update(refresh=1)
+        # The task finishes in a worker thread, possibly after the app first
+        # reports idle; its result comes in a busy/idle round of its own.
+        if not reply.notifications():
+            more = await session._drain()
+            reply.messages += more.messages
+        return reply
+
+    # A browser reports the button at 0 on load; the click is the change to 1.
+    reply = visit(app_server, scenario, refresh=0)
+    assert reply.errors == {}
+    notes = reply.notifications()
+    assert any("Loaded" in n and "records" in n for n in notes), notes
+    assert not any("Refresh failed" in n for n in notes)
+    # bslib's task button is told it is busy, then ready again.
+    states = [x["message"].get("state") for m in reply.messages
+              for x in m.get("inputMessages") or [] if x.get("id") == "refresh"]
+    assert states[:1] == ["busy"] and states[-1] == "ready", states
+
+
 def test_csv_downloads_are_registered_and_streamed(app_server):
     async def scenario(session: Session, first: Reply, html: str):
         return first, {k: session.download(k)
                        for k in ("dl_adoption", "dl_models", "dl_attr", "dl_conversations",
-                                 "dl_records")}
+                                 "dl_records", "dl_principal_spend")}
 
     reply, files = visit(app_server, scenario)
     assert sorted(k for k in reply.values if k.startswith("dl_")) == [
         "dl_adoption", "dl_attr", "dl_conversations", "dl_models", "dl_pf_conv_groups",
-        "dl_pf_records", "dl_pf_rel_0", "dl_pf_rel_1", "dl_records",
+        "dl_pf_records", "dl_pf_rel_0", "dl_pf_rel_1", "dl_principal_spend", "dl_records",
     ]
     for name, body in files.items():
         rows = csv_rows(body)
         assert rows, f"{name} is empty"
     assert "est_spend_usd" in files["dl_attr"].splitlines()[0]
     assert files["dl_conversations"].splitlines()[0].startswith("conversation_id")
+    assert files["dl_principal_spend"].splitlines()[0] == (
+        "kind,id,name,email,owner,requests,tokens,est_spend_usd")
 
 
 def test_unpriced_models_are_warned_about_in_the_top_bar(app_server, loaded, f):
@@ -209,7 +234,7 @@ class TestBookmark:
         reply = visit(app_server, scenario)
         (url,) = reply.query_strings()
         assert set(bookmark_query(url)) == {
-            "_inputs_", "preset", "grain", "attr_kind", "pf_kind", "date_range",
+            "_inputs_", "preset", "grain", "attr_kind", "pf_kind", "pf_pick", "date_range",
             "f_users", "f_contents", "f_sessions", "f_providers", "f_models", "f_meta",
             "dark_mode", "main_tabs",
         }

@@ -63,7 +63,7 @@ def test_attribution_ranking_and_export(loaded, f, make_ctx):
             return exports, exports["attr"][0]()
 
     exports, df = attribution_export()
-    assert list(exports) == ["attr"]
+    assert list(exports) == ["principal_spend", "attr"]
     assert exports["attr"][1] == "attribution.csv"
     assert df.columns.tolist() == [
         "kind", "id", "name", "detail", "why", "est_spend_usd", "requests",
@@ -79,6 +79,33 @@ def test_attribution_ranking_and_export(loaded, f, make_ctx):
         GROUP BY username HAVING SUM({pricing.est_cost()}) > 0)""")
     assert users.est_spend_usd.sum() == pytest.approx(user_spend)
     assert users.id.tolist() == users.name.tolist()
+
+
+def test_spend_by_principal_export_lists_every_user_and_content_item(loaded, f, make_ctx):
+    ctx, exports = make_ctx()
+    attribution.server(SimpleNamespace(attr_kind=lambda: "session"), ctx, lambda k, v: None)
+    with reactive.isolate():
+        df = exports["principal_spend"][0]()
+    assert exports["principal_spend"][1] == "spend_by_principal.csv"
+    assert df.columns.tolist() == [
+        "kind", "id", "name", "email", "owner", "requests", "tokens", "est_spend_usd"]
+    # Not tied to the Show toggle: users and content, whatever it says.
+    assert set(df.kind) == {"user", "content"}
+    where = filters.where(f)
+    for kind, col in (("user", "username"), ("content", "content_guid")):
+        part = df[df.kind == kind]
+        assert set(part.id) == set(loaded.q(
+            f"SELECT DISTINCT {col} AS id FROM gateway_events "
+            f"WHERE {where} AND {col} IS NOT NULL AND {col} <> ''").id)
+        assert part.requests.sum() == loaded.scalar(
+            f"SELECT COUNT(*) FROM gateway_events WHERE {where} AND {col} IS NOT NULL")
+        assert part.est_spend_usd.sum() == pytest.approx(loaded.scalar(
+            f"SELECT SUM({pricing.est_cost()}) FROM gateway_events "
+            f"WHERE {where} AND {col} IS NOT NULL"), abs=0.01)
+    # Every user's email is filled in; content gets an owner instead.
+    assert df[df.kind == "user"].email.notna().all()
+    assert df[df.kind == "content"].email.isna().all()
+    assert df.est_spend_usd.tolist() == sorted(df.est_spend_usd, reverse=True)
 
 
 def test_conversations_export_and_unpriced_exclusion(loaded, f, make_ctx):
@@ -170,7 +197,11 @@ def test_adoption_export_counts_active_users(loaded, f, make_ctx):
     df, filename = run_export(make_ctx, adoption, "adoption", adopt_grain="day",
                               tool_grain="week", heat_measure="requests")
     assert filename == "adoption_active_users.csv"
-    assert df.columns.tolist() == ["day", "dau", "wau", "mau"]
+    # Spelled out: the export is read by people who do not know the acronyms.
+    assert df.columns.tolist() == [
+        "day", "daily_active_users", "weekly_active_users", "monthly_active_users"]
+    df = df.rename(columns={"daily_active_users": "dau", "weekly_active_users": "wau",
+                            "monthly_active_users": "mau"})
     days = (f["end"] - f["start"]).days + 1
     assert len(df) == days
     assert df.day.astype(str).str[:10].tolist() == sorted(df.day.astype(str).str[:10])
@@ -195,8 +226,8 @@ def test_adoption_narrowed_to_one_user(loaded, f, make_ctx):
     f["users"] = [user.username[0]]
     df, _ = run_export(make_ctx, adoption, "adoption", adopt_grain="day",
                        tool_grain="week", heat_measure="requests")
-    assert df.mau.max() == 1
-    assert df.dau.max() == 1
+    assert df.monthly_active_users.max() == 1
+    assert df.daily_active_users.max() == 1
 
 
 def test_models_export_totals_and_unpriced_model(loaded, f, make_ctx):

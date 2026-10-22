@@ -24,6 +24,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
 
@@ -157,19 +158,15 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-@pytest.fixture(scope="session")
-def fake_connect(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
-    """Start demo/fake_connect.py and point the app's environment at it.
-
-    The fake caps list pages at 3 rows, so reading groups and their members
-    follows several pages, as it can against a real Connect.
-    """
+@contextmanager
+def _running_fake(**env: str) -> Iterator[str]:
+    """demo/fake_connect.py on a free port, with these extra environment
+    variables (FAKE_PROFILE, ...). Yields its URL once it is listening."""
     port = _free_port()
-    env = {**os.environ, "MOCK_CONNECT_PORT": str(port), "FAKE_ROWS": "1000",
-           "MOCK_PAGE_CAP": "3"}
     proc = subprocess.Popen(
         [sys.executable, str(ROOT / "demo" / "fake_connect.py")],
-        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        cwd=ROOT, env={**os.environ, "MOCK_CONNECT_PORT": str(port), **env},
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
     url = f"http://127.0.0.1:{port}"
     try:
@@ -185,18 +182,57 @@ def fake_connect(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
                 time.sleep(0.1)
         else:
             raise RuntimeError("fake Connect did not start")
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setenv("CONNECT_SERVER", url)
-            mp.setenv("CONNECT_API_KEY", "test")
-            mp.setenv("GATEWAY_CACHE_DIR", str(tmp_path_factory.mktemp("gateway-cache")))
-            mp.delenv("GATEWAY_FROM", raising=False)
-            mp.delenv("GATEWAY_TO", raising=False)
-            yield url
+        yield url
     finally:
         proc.terminate()
         proc.wait(timeout=5)
         if proc.stderr:
             proc.stderr.close()
+
+
+@contextmanager
+def _running_app(env: dict[str, str]) -> Iterator[str]:
+    """`shiny run app:app` on a free port with this environment. Yields its URL."""
+    port = _free_port()
+    server = subprocess.Popen(
+        [sys.executable, "-m", "shiny", "run", "app:app", "--port", str(port)],
+        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    assert server.stderr is not None
+    url = f"http://127.0.0.1:{port}"
+    try:
+        for _ in range(300):
+            if server.poll() is not None:
+                raise RuntimeError(server.stderr.read().decode())
+            try:
+                urllib.request.urlopen(f"{url}/", timeout=1).close()
+                break
+            except (urllib.error.URLError, ConnectionError):
+                time.sleep(0.1)
+        else:
+            raise RuntimeError("app did not start")
+        yield url
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
+        server.stderr.close()
+
+
+@pytest.fixture(scope="session")
+def fake_connect(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """Start demo/fake_connect.py and point the app's environment at it.
+
+    The fake caps list pages at 3 rows, so reading groups and their members
+    follows several pages, as it can against a real Connect.
+    """
+    with _running_fake(FAKE_ROWS="1000", MOCK_PAGE_CAP="3") as url, \
+            pytest.MonkeyPatch.context() as mp:
+        mp.setenv("CONNECT_SERVER", url)
+        mp.setenv("CONNECT_API_KEY", "test")
+        mp.setenv("GATEWAY_CACHE_DIR", str(tmp_path_factory.mktemp("gateway-cache")))
+        mp.delenv("GATEWAY_FROM", raising=False)
+        mp.delenv("GATEWAY_TO", raising=False)
+        yield url
 
 
 @pytest.fixture(scope="session")
@@ -229,31 +265,25 @@ def app_server(fake_connect: str, tmp_path_factory: pytest.TempPathFactory) -> I
 
     Tests open sessions on it with tests/session.py. Marked `app` (see pytest.ini).
     """
-    port = _free_port()
     cache = tmp_path_factory.mktemp("app-cache")
-    server = subprocess.Popen(
-        [sys.executable, "-m", "shiny", "run", "app:app", "--port", str(port)],
-        cwd=ROOT, env={**os.environ, "GATEWAY_CACHE_DIR": str(cache)},
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-    )
-    assert server.stderr is not None
-    url = f"http://127.0.0.1:{port}"
-    try:
-        for _ in range(300):
-            if server.poll() is not None:
-                raise RuntimeError(server.stderr.read().decode())
-            try:
-                urllib.request.urlopen(f"{url}/", timeout=1).close()
-                break
-            except (urllib.error.URLError, ConnectionError):
-                time.sleep(0.1)
-        else:
-            raise RuntimeError("app did not start")
+    with _running_app({**os.environ, "GATEWAY_CACHE_DIR": str(cache)}) as url:
         yield url
-    finally:
-        server.terminate()
-        server.wait(timeout=10)
-        server.stderr.close()
+
+
+@pytest.fixture(scope="session")
+def sparse_app_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """The app against a fake Connect in its "sparse" profile: no User-Agent, no
+    Gateway-Metadata, almost nothing from content (see demo/fake_connect.py).
+    What a real server can look like, and where empty charts and zero-divisions
+    show up. Its own fake and app, so the shared ones keep their data.
+    """
+    with _running_fake(FAKE_ROWS="1500", FAKE_PROFILE="sparse") as fake:
+        env = {**os.environ, "CONNECT_SERVER": fake, "CONNECT_API_KEY": "test",
+               "GATEWAY_CACHE_DIR": str(tmp_path_factory.mktemp("sparse-cache"))}
+        env.pop("GATEWAY_FROM", None)
+        env.pop("GATEWAY_TO", None)
+        with _running_app(env) as url:
+            yield url
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -264,3 +294,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.connect)
         if "app_server" in names:
             item.add_marker(pytest.mark.app)
+        if "sparse_app_server" in names:
+            item.add_marker(pytest.mark.app)
+            item.add_marker(pytest.mark.connect)

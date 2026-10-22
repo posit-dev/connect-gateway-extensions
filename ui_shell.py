@@ -208,8 +208,13 @@ def _shell(
         ui.output_ui("topbar_status"),
         ui.div(
             ui.output_ui("topbar_meta", inline=True),
-            ui.input_action_button(
-                "refresh", "Refresh data", class_="btn-sm refresh-btn"
+            # A task button: a refresh re-exports the whole window from Connect,
+            # which takes tens of seconds, so the button says so and stays
+            # disabled until the new data is in.
+            ui.input_task_button(
+                "refresh", "Refresh data", label_busy="Refreshing\u2026",
+                # "default": the btn-default look the action button had
+                type="default", class_="btn-sm refresh-btn",
             ),
             class_="topbar-load",
         ),

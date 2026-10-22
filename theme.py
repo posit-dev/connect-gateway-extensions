@@ -8,6 +8,8 @@ chart is paired with direct labels and/or a table view.
 
 from __future__ import annotations
 
+import math
+import textwrap
 from typing import Any, Callable, cast
 
 import plotly.graph_objects as go
@@ -116,9 +118,16 @@ TOOL_ORDER = ["Posit Assistant", "Claude Code", "GitHub Copilot", "Codex CLI", "
 _SLOTS = {"model": MODEL_ORDER, "provider": PROVIDER_ORDER, "origin": ORIGIN_ORDER, "tool": TOOL_ORDER}
 
 
+# Buckets that stand for "not known" rather than a real value: gray, like
+# "Other", so they never pass for a model, origin or harness.
+UNKNOWN_NAMES = {"(unidentified)", "(no user agent)", "(no model)", "other"}
+
+
 def color(kind: str, name: str, mode: str) -> str:
     order = _SLOTS[kind]
     series = TOKENS[mode]["series"]
+    if name in UNKNOWN_NAMES:
+        return TOKENS[mode]["muted"]
     if name in order:
         return series[order.index(name) % len(series)]
     # A name with no reserved slot still gets a colour of its own, kept
@@ -133,9 +142,34 @@ def color(kind: str, name: str, mode: str) -> str:
 
 
 def seq_colorscale(mode: str):
+    """Low to high, for a heatmap whose minimum is zero.
+
+    Zero is the grid colour, so an empty cell reads as "nothing" rather than as
+    the first step of the scale. The ramp then runs faint to strong: dark blue
+    to near-white on the dark card, near-white to dark blue on the light one.
+    """
     ramp = TOKENS[mode]["seq"]
+    # The light ramp's first step is as pale as the light grid; start one step
+    # in, so the smallest real value still reads as "something".
+    if mode == "light":
+        ramp = ramp[1:]
     n = len(ramp) - 1
-    return [[i / n, c] for i, c in enumerate(ramp)]
+    # Any value above zero starts at the first step, a hair above the empty cell.
+    eps = 1e-6
+    return [[0.0, TOKENS[mode]["grid"]], [eps, ramp[0]]] + [
+        [eps + (1 - eps) * i / n, c] for i, c in enumerate(ramp) if i
+    ]
+
+
+def usd_axis(fig: go.Figure, axis: str = "x", **kw) -> go.Figure:
+    """A dollar axis with plain numbers on it.
+
+    Plotly's default SI suffixes write $0.00002 as "20\u00b5"; a micro-dollar
+    reads as nonsense on a spend chart.
+    """
+    opts = {"tickprefix": "$", "exponentformat": "none", "separatethousands": True, **kw}
+    (fig.update_xaxes if axis == "x" else fig.update_yaxes)(**opts)
+    return fig
 
 
 def apply(
@@ -218,17 +252,40 @@ def empty_fig(
     """
     t = TOKENS[mode]
     fig = go.Figure()
+    # Annotations do not wrap, and a long reason ran off the card.
+    text = "<br>".join(textwrap.wrap(msg, 64)) if "<br>" not in msg else msg
     fig.add_annotation(
-        text=msg, showarrow=False, font={"color": t["muted"], "size": 13}
+        text=text, showarrow=False, font={"color": t["muted"], "size": 13}
     )
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False)
     return apply(fig, mode, height=height)
 
 
-def fmt_usd(v: float) -> str:
+def _finite(v) -> float | None:
+    """v as a float, or None when there is no figure: None, NaN (an empty SUM or
+    mean), or an infinite ratio."""
+    if v is None:
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def missing(v) -> bool:
+    """No figure to show: None, NaN, or infinity."""
+    return _finite(v) is None
+
+
+def fmt_usd(v: float | None) -> str:
+    v = _finite(v)
     if v is None:
         return "–"
+    # Spend too small to show in cents is still spend: "$0.00" read as free.
+    if 0 < abs(v) < 0.005:
+        return "<$0.01"
     if abs(v) >= 10_000:
         return f"${v / 1000:,.1f}k"
     if abs(v) >= 100:
@@ -236,7 +293,8 @@ def fmt_usd(v: float) -> str:
     return f"${v:,.2f}"
 
 
-def fmt_num(v: float) -> str:
+def fmt_num(v: float | None) -> str:
+    v = _finite(v)
     if v is None:
         return "–"
     if abs(v) >= 1_000_000:
@@ -249,14 +307,30 @@ def fmt_num(v: float) -> str:
 # The KPI tiles are wide enough for the whole number, so they spell it out where
 # fmt_usd and fmt_num abbreviate: those two are still what chart labels, axis
 # ticks and inline footnotes want, where space is tight.
-def card_usd(v: float) -> str:
-    """Whole dollars — cents are noise against a range total."""
-    return "–" if v is None else f"${v:,.0f}"
+def card_usd(v: float | None) -> str:
+    """Whole dollars — cents are noise against a range total.
+
+    Under a dollar the cents are the whole figure, so they are kept: "$0" would
+    say a principal that spent 40 cents spent nothing.
+    """
+    v = _finite(v)
+    if v is None:
+        return "–"
+    if 0 < abs(v) < 1:
+        return fmt_usd(v)
+    return f"${v:,.0f}"
 
 
-def card_num(v: float) -> str:
+def card_num(v: float | None) -> str:
     """A full count with thousands separators, unabbreviated."""
+    v = _finite(v)
     return "–" if v is None else f"{v:,.0f}"
+
+
+def fmt_pct(v: float | None, digits: int = 0) -> str:
+    """A percentage already scaled to 0-100, or a dash when there is none."""
+    v = _finite(v)
+    return "–" if v is None else f"{v:,.{digits}f}%"
 
 
 # Longer than this, a tile's value is a name rather than a figure.

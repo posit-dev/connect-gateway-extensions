@@ -6,6 +6,7 @@ from shinywidgets import output_widget
 
 import theme
 import usage
+from filters import NO_USER_AGENT, UNIDENTIFIED, dim_sql
 from pages.context import PageContext
 from theme import apply, card_num, card_usd, color, empty_fig, render_widget
 from ui_shell import chart_row, help_icon, page_header
@@ -56,12 +57,16 @@ def panel():
                 help_icon(
                     ui.p(
                         ui.strong("Origin"), " is where the request came from: "
-                        " Connect, a Workbench, or "
-                        "client running locally."
+                        "Connect content, a Workbench session, or a client running "
+                        "locally. ", ui.strong(UNIDENTIFIED), " is a request made "
+                        "outside content by a client that did not name its host "
+                        "(Claude Code, Copilot, a script, or no User-Agent at all), so "
+                        "Connect cannot tell whether it ran in Workbench or on a laptop."
                     ),
                     ui.p(
-                        ui.strong("Harness"), " is the client software that made the call. This is derived "
-                        "from the User-Agent header the caller sent.",
+                        ui.strong("Harness"), " is the client software that made the "
+                        "call, read from the User-Agent header the caller sent. ",
+                        ui.strong(NO_USER_AGENT), " is a request that sent none.",
                         class_="mb-0",
                     ),
                 ),
@@ -85,11 +90,20 @@ def server(input, ctx: PageContext):
     @render.ui
     def kpis():
         f = flt()
+        # Each average divides the spend of that kind's own rows: all of the
+        # spend over two content items read as $3,769 per item when nearly all of
+        # it came from people outside content.
         r = usage.q(f"""SELECT COALESCE(SUM({est_cost()}),0) est,
                             COUNT(*) requests,
                             COUNT(DISTINCT username) users,
                             COUNT(DISTINCT content_guid) contents,
-                            COUNT(DISTINCT workbench_session_id) sessions
+                            COUNT(DISTINCT workbench_session_id) sessions,
+                            COALESCE(SUM({est_cost()}) FILTER (
+                                WHERE username IS NOT NULL), 0) user_est,
+                            COALESCE(SUM({est_cost()}) FILTER (
+                                WHERE content_guid IS NOT NULL), 0) content_est,
+                            COALESCE(SUM({est_cost()}) FILTER (
+                                WHERE workbench_session_id IS NOT NULL), 0) session_est
                      FROM gateway_events WHERE {where(f)}""").iloc[0]
         # Org-wide: the busiest model across everyone in the date range and
         # origin, not narrowed by the user, content, provider or model filters,
@@ -107,10 +121,38 @@ def server(input, ctx: PageContext):
                           GROUP BY 1 ORDER BY 2 DESC LIMIT 1""")
         users, contents, sessions = int(r.users), int(r.contents), int(r.sessions)
 
-        def avg(n: int, noun: str) -> str:
+        def avg(n: int, spend: float, noun: str) -> str:
             if not n:
                 return f"no {noun}s in range"
-            return f"{card_usd(r.est / n)} avg / {noun}"
+            return f"{card_usd(spend / n)} avg / {noun}"
+
+        # No session ids anywhere in the loaded data means Workbench is not
+        # attaching them (or none of the traffic is from Workbench), not that
+        # nobody used a session. Say that rather than show a bare 0.
+        reported = bool(ctx.cat()["session_labels"])
+        sessions_help = help_icon(
+            "What is a session?",
+            ui.p(
+                "A Workbench session: one running RStudio Pro, Positron or VS Code "
+                "session. Workbench names it in the Gateway-Metadata header "
+                "(workbench-session-id) of each request it sends."
+            ),
+            ui.p(
+                "Requests from Connect content, from a laptop, or from a Workbench "
+                "that does not send the header carry no session, so they do not "
+                "count here.",
+                class_="mb-0",
+            ),
+        )
+        if reported:
+            sessions_tile = theme.stat_tile(
+                "Sessions", card_num(sessions), avg(sessions, r.session_est, "session"),
+                help=sessions_help,
+            )
+        else:
+            sessions_tile = theme.stat_tile(
+                "Sessions", "\u2013", "not reported by Workbench", help=sessions_help,
+            )
 
         return ui.layout_columns(
             theme.stat_tile(
@@ -119,18 +161,14 @@ def server(input, ctx: PageContext):
             theme.stat_tile(
                 "Users",
                 card_num(users),
-                avg(users, "user"),
+                avg(users, r.user_est, "user"),
             ),
             theme.stat_tile(
                 "Content",
                 card_num(contents),
-                avg(contents, "content"),
+                avg(contents, r.content_est, "content item"),
             ),
-            theme.stat_tile(
-                "Sessions",
-                card_num(sessions),
-                avg(sessions, "session"),
-            ),
+            sessions_tile,
             theme.stat_tile(
                 "Top model",
                 top.model.iloc[0] if not top.empty else "\u2013",
@@ -173,15 +211,17 @@ def server(input, ctx: PageContext):
                 hovertemplate=f"<b>{m['prefix']}%{{y:{m['tick']}}}</b> {k}<extra></extra>",
             )
         fig.update_layout(barmode="stack", bargap=0.25)
-        return apply(
+        apply(
             fig, f["mode"], height=300, time_axis=True, showlegend=True,
             y_title=m["axis"].replace("/ day", f"/ {grain}"), hover=True,
         )
+        return theme.usd_axis(fig, "y") if m["prefix"] == "$" else fig
 
     def share_donut(f, m, dim: str, color_kind: str | None, top: int = 8, empty=None):
         """The split of one axis, largest slices first and the tail as "Other"."""
-        df = usage.q(f"""SELECT {dim} AS k, SUM({m["expr"]}) v FROM gateway_events
-                         WHERE {where(f)} AND {dim} IS NOT NULL AND {dim} <> ''
+        k = dim_sql(dim)
+        df = usage.q(f"""SELECT {k} AS k, SUM({m["expr"]}) v FROM gateway_events
+                         WHERE {where(f)} AND {k} IS NOT NULL AND {k} <> ''
                          GROUP BY 1 ORDER BY 2 DESC""")
         df = df[df.v > 0]
         if df.empty:

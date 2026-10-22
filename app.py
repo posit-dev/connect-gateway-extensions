@@ -28,6 +28,7 @@ Run:  .venv/bin/shiny run app:app --port 8000
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date, timedelta
 from pathlib import Path
@@ -43,7 +44,7 @@ import usage
 from pages import adoption, attribution, models, overview, raw_data
 from pages import conversations as conversations_page
 from pages.context import PageContext
-from filters import TOKEN_COUNT, sql_str, where
+from filters import TOKEN_COUNT, dim_sql, sql_str, where
 from pricing import est_cost, est_cost_uncached
 from table_format import GUID_LABEL_CHARS
 from theme import apply, card_usd, color, empty_fig, fmt_num, fmt_usd
@@ -229,13 +230,14 @@ def fitted_grid(df: pd.DataFrame, scroll_after: int = 12, **kw) -> render.DataGr
 # query gives it. Money is shown to the dollar because cents are noise next to a
 # monthly estimate, and counts get thousands separators.
 DISPLAY_FMT = {
-    "est_spend_usd": lambda v: f"${v:,.0f}",
+    # card_usd: whole dollars, but cents under $1, so 30 cents is not "$0"
+    "est_spend_usd": card_usd,
     "tokens": lambda v: f"{v:,.0f}",
     "input_tokens": lambda v: f"{v:,.0f}",
     "output_tokens": lambda v: f"{v:,.0f}",
     "cache_read_tokens": lambda v: f"{v:,.0f}",
     "cache_pct": lambda v: f"{v:,.1f}%",
-    "cache_savings_usd": lambda v: f"${v:,.0f}",
+    "cache_savings_usd": card_usd,
     "error_pct": lambda v: f"{v:,.1f}%",
     "pct_of_total": lambda v: f"{v:,.1f}%",
     "p95_ms": lambda v: f"{v:,.0f}",
@@ -260,7 +262,8 @@ def formatted(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for col, fmt in DISPLAY_FMT.items():
         if col in out.columns:
-            out[col] = [None if pd.isna(v) else fmt(v) for v in out[col]]
+            # missing() is NaN and inf too: a ratio over zero is blank, not "inf".
+            out[col] = [None if theme.missing(v) else fmt(v) for v in out[col]]
     return out
 
 
@@ -578,10 +581,12 @@ def server(input, output, session):
                 f"{int(r.contents):,} content {plural(r.contents, 'item')}",
                 class_="pill",
             ),
+            # Only when the data has sessions at all: "0 sessions" on a server
+            # whose Workbench sends no session ids reads as "nobody used one".
             ui.span(
                 f"{int(r.sessions):,} {plural(r.sessions, 'session')}",
                 class_="pill",
-            ),
+            ) if c["session_labels"] else None,
             ui.span(f"{card_usd(r.est)} est. spend", class_="pill"),
             unpriced_pill(),
             class_="topbar-right",
@@ -595,21 +600,37 @@ def server(input, output, session):
         loaded()
         return catalog()
 
+    # The reload runs in a worker thread: it waits on Connect's export for tens of
+    # seconds, and on the event loop that froze the session with no sign that
+    # anything was happening. The task button reads "Refreshing…" meanwhile, and
+    # usage.load holds its own locks, so pages keep querying the old table.
+    @ui.bind_task_button(button_id="refresh")
+    @reactive.extended_task
+    async def reload_task() -> dict:
+        return await asyncio.to_thread(usage.load)
+
     @reactive.effect
     # ignore_init, or opening the dashboard would re-read the export every time
     @reactive.event(input.refresh, ignore_init=True)
     def _refresh():
-        try:
-            info = usage.load()
-        except RuntimeError as e:
+        reload_task()
+
+    @reactive.effect
+    @reactive.event(reload_task.status, ignore_init=True)
+    def _refreshed():
+        status = reload_task.status()
+        if status == "error":
             # the reload rolled back, so the loaded data is still intact
             ui.notification_show(
                 f"Refresh failed — showing the data from "
-                f"{loaded()['loaded_at']:%H:%M UTC}. {e}",
+                f"{loaded()['loaded_at']:%H:%M UTC}. {reload_task.error.get()}",
                 type="error",
                 duration=15,
             )
             return
+        if status != "success":
+            return
+        info = reload_task.value.get()
         c = catalog()
         # A selection that no longer exists in the reloaded data is dropped; an
         # empty result means no narrowing, the same as the initial state.
@@ -741,11 +762,19 @@ def server(input, output, session):
         }
 
     def total_bars(
-        f, m, dim: str, color_kind: str | None, limit: int = 15, height: int = 320
+        f, m, dim: str, color_kind: str | None, limit: int = 15, height: int = 320,
+        detail: str | None = None,
     ) -> go.Figure:
-        """Category totals, biggest last so the bars read bottom-up."""
-        df = usage.q(f"""SELECT {dim} AS k, SUM({m["expr"]}) v, COUNT(*) req
-                         FROM gateway_events WHERE {where(f)} AND {dim} IS NOT NULL
+        """Category totals, biggest last so the bars read bottom-up.
+
+        Origin and harness keep their NULL rows as a named bucket (see
+        filters.dim_sql), so the bars add up to the spend on the page.
+        `detail` names a second column whose split each bar's hover lists, e.g.
+        the providers behind one model.
+        """
+        k = dim_sql(dim)
+        df = usage.q(f"""SELECT {k} AS k, SUM({m["expr"]}) v, COUNT(*) req
+                         FROM gateway_events WHERE {where(f)} AND {k} IS NOT NULL
                          GROUP BY 1 ORDER BY 2 DESC LIMIT {limit}""").iloc[::-1]
         df = df[df.v > 0]
         if df.empty:
@@ -755,6 +784,15 @@ def server(input, output, session):
             if color_kind
             else [theme.TOKENS[f["mode"]]["series"][0]] * len(df)
         )
+        split: dict[str, str] = {}
+        if detail:
+            d = usage.q(f"""SELECT {k} AS k, {dim_sql(detail)} AS d, SUM({m["expr"]}) v
+                            FROM gateway_events WHERE {where(f)} AND {k} IS NOT NULL
+                            GROUP BY 1, 2 ORDER BY 3 DESC""")
+            for key, grp in d.groupby("k", sort=False):
+                split[str(key)] = "".join(
+                    f"\n\u2022 {name}: {m['fmt'](v)}" for name, v in zip(grp.d, grp.v)
+                )
         # The colours key off the raw value, the axis off the short label, and
         # hover reads the full value out of customdata rather than off the axis.
         fig = go.Figure(
@@ -768,15 +806,16 @@ def server(input, output, session):
                 textposition="outside",
                 textfont={"color": theme.TOKENS[f["mode"]]["ink"], "size": 15},
                 customdata=[
-                    f"{lab}\n{m['fmt'](v)}"
-                    for lab, v in zip(chart_labels(dim, df.k), df.v)
+                    f"{lab}\n{m['fmt'](v)}{split.get(str(key), '')}"
+                    for lab, key, v in zip(chart_labels(dim, df.k), df.k, df.v)
                 ],
                 hoverinfo="none",  # the name follows the mouse; see nametip below
             )
         )
         fig.update_layout(meta="nametip")
         fig.update_xaxes(range=[0, df.v.max() * 1.25], title_text=m["total_axis"])
-        return apply(fig, f["mode"], height=height, showlegend=False, hover=True)
+        apply(fig, f["mode"], height=height, showlegend=False, hover=True)
+        return theme.usd_axis(fig) if m["prefix"] == "$" else fig
 
     # ---- unpriced checks: the topbar and pages/conversations.py share them ---
     def unpriced_pill():

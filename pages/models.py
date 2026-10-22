@@ -7,7 +7,7 @@ from shinywidgets import output_widget
 
 import theme
 import usage
-from filters import sql_str
+from filters import dim_sql, sql_str
 from pages.context import PageContext
 from table_format import pretty_columns
 from theme import apply, card_num, card_usd, color, empty_fig, render_widget
@@ -19,7 +19,26 @@ def panel():
         "Models",
         page_header("Models"),
         ui.output_ui("model_kpis"),
-        ui.card(ui.card_header("Estimated spend by model"), output_widget("models_bars")),
+        ui.card(
+            ui.card_header(
+                ui.div(
+                    ui.span("Estimated spend by model"),
+                    help_icon(
+                        "One model, several providers",
+                        ui.p(
+                            "Model names are normalized: the release date and any "
+                            "Bedrock region or inference-profile prefix are dropped, "
+                            "so claude-opus-4-7 bought from Anthropic and from Bedrock "
+                            "is one bar. Hover a bar for its spend by provider; the "
+                            "table below lists the providers of each model.",
+                            class_="mb-0",
+                        ),
+                    ),
+                    class_="hdr-flex-left",
+                )
+            ),
+            output_widget("models_bars"),
+        ),
         ui.card(
             ui.card_header(
                 ui.div(
@@ -183,13 +202,17 @@ def server(input, ctx: PageContext):
                     ),
                 ),
             ),
+            # The top model is a name, not a figure: it gets the widest tile so a
+            # full model id fits on one line instead of ending in "...".
+            col_widths=[2, 3, 2, 3, 2],
             class_="kpi-row",
         )
 
     @render_widget
     def models_bars():
         f = flt()
-        return total_bars(f, measure_of(f), "model", "model", limit=12, height=340)
+        return total_bars(f, measure_of(f), "model", "model", limit=12, height=340,
+                          detail="provider")
 
     @render_widget
     def models_adoption():
@@ -258,13 +281,16 @@ def server(input, ctx: PageContext):
     @render_widget
     def cache_savings_time():
         f = flt()
-        df = usage.q(f"""SELECT day, tool AS k, SUM({est_cost_uncached()} - {est_cost()}) v
+        # Requests with no User-Agent are a harness bucket of their own; dropping
+        # them left the chart empty on a server whose callers send none.
+        df = usage.q(f"""SELECT day, {dim_sql("tool")} AS k,
+                                SUM({est_cost_uncached()} - {est_cost()}) v
                          FROM gateway_events
-                         WHERE {where(f)} AND tool IS NOT NULL
+                         WHERE {where(f)}
                          GROUP BY 1, 2 ORDER BY 1""")
-        if df.empty or not df.v.abs().sum():
+        df["v"] = df.v.fillna(0).clip(lower=0)
+        if df.empty or not df.v.sum():
             return empty_fig(f["mode"], "No cache savings recorded in this view")
-        df["v"] = df.v.clip(lower=0)
         fig = go.Figure()
         # largest saver first, so the stack and legend read in the same order
         for m in df.groupby("k").v.sum().sort_values(ascending=False).index:
@@ -273,10 +299,12 @@ def server(input, ctx: PageContext):
                 x=d.day, y=d.v, name=m, marker={"color": color("tool", m, f["mode"])},
                 hovertemplate=f"<b>$%{{y:,.2f}}</b> saved \u00b7 {m}<extra></extra>",
             )
-        fig.update_layout(barmode="stack", barnorm="percent", bargap=0.25)
-        fig.update_yaxes(range=[0, 100], ticksuffix="%")
-        return apply(fig, f["mode"], height=300, time_axis=True, showlegend=True,
-                     y_title="share of est. savings / day", hover=True)
+        # Dollars, stacked by harness. A percent stack said nothing when there
+        # was one harness (every day a full bar) and hid how much was saved.
+        fig.update_layout(barmode="stack", bargap=0.25)
+        apply(fig, f["mode"], height=300, time_axis=True, showlegend=True,
+              y_title="est. USD saved / day", hover=True)
+        return theme.usd_axis(fig, "y")
 
     @render_widget
     def cache_rate_time():

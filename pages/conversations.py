@@ -287,7 +287,18 @@ def server(input, ctx: PageContext):
                 help=help_icon(
                     "Coverage",
                     ui.p(
-                        "The share of requests that are linked to a conversation. ",
+                        "The share of requests that are linked to a conversation. "
+                        "Derived ids are the ones Connect made up itself, from the "
+                        "user, the content and the request's first message, because "
+                        "the client sent no Session-Id header."
+                    ),
+                    ui.p(
+                        "A request has no id when the client sent no Session-Id and "
+                        "Connect could not derive one. Connect derives ids only for "
+                        "Anthropic and Bedrock chat requests whose messages it can "
+                        "read, so OpenAI traffic, non-chat calls, and bodies it could "
+                        "not parse have none. Those requests still count everywhere "
+                        "else; only this page leaves them out.",
                         class_="mb-0",
                     ),
                 ),

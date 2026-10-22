@@ -28,9 +28,10 @@ import conversations as conv_tools
 import theme
 import usage
 from conversations import HIGH_PCT, MIN_BASELINE, higher_cost
+from filters import dim_sql
 from pages.context import PageContext
 from theme import apply, card_num, card_usd, empty_fig, fmt_usd, render_widget
-from ui_shell import page_header, table_header
+from ui_shell import empty_note, page_header, table_header
 
 KINDS = {"user": "User", "content": "Content", "session": "Session", "group": "Group"}
 NOUN = {"user": "user", "content": "content item", "session": "session", "group": "group"}
@@ -179,8 +180,13 @@ def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
         return [
             dict(title="Content", df=content, label="content",
                  note="How they reached it: as a viewer, or as the owner of content "
-                      "running on its own credentials."),
-            dict(title="Sessions", df=sessions, label="session", note=""),
+                      "running on its own credentials.",
+                 empty="No Connect content used in this view: all of this user's "
+                       "requests came from outside content."),
+            dict(title="Sessions", df=sessions, label="session", note="",
+                 empty="No Workbench sessions in this view. A session is known only "
+                       "when Workbench names it in the request's Gateway-Metadata "
+                       "header (workbench-session-id)."),
         ]
     if kind == "content":
         users = usage.q(f"""
@@ -195,9 +201,11 @@ def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
             WHERE {w} AND {p} GROUP BY 1 ORDER BY est_spend_usd DESC""")
         return [
             dict(title="Who drives it", df=users, label="user",
-                 note=f"The top user accounts for {top:.0%} of its spend." if len(users) else ""),
+                 note=f"The top user accounts for {top:.0%} of its spend." if len(users) else "",
+                 empty="No user was charged for this content in this view."),
             dict(title="By the charged users' Connect groups", df=groups, label="group",
-                 note="A user in several groups counts in each, so these overlap."),
+                 note="A user in several groups counts in each, so these overlap.",
+                 empty="None of the charged users is in a Connect group."),
         ]
     if kind == "session":
         owner = usage.scalar(f"SELECT MAX(username) FROM gateway_events WHERE {p}")
@@ -220,7 +228,8 @@ def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
         return [
             dict(title=f"All sessions by {owner}", df=others, label="session",
                  note="\u25b6 marks this one."),
-            dict(title=f"{owner}'s Workbench projects", df=projects, label="project", note=""),
+            dict(title=f"{owner}'s Workbench projects", df=projects, label="project", note="",
+                 empty="No Workbench project named in this view."),
         ]
     members = usage.q(f"""
         SELECT a.username AS user, o.other_groups, a.requests, a.est_spend_usd
@@ -239,10 +248,12 @@ def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
     total = members.est_spend_usd.sum()
     shared = members[members.other_groups.notna()].est_spend_usd.sum()
     return [
-        dict(title="Members by spend", df=members, label="user", note=""),
+        dict(title="Members by spend", df=members, label="user", note="",
+             empty="No member of this group made a request in this view."),
         dict(title="Overlap with other groups", df=overlap, label="group",
              note=(f"{fmt_usd(shared)} of this group's {fmt_usd(total)} ({shared / total:.0%}) "
-                   "is also counted under another group.") if total else ""),
+                   "is also counted under another group.") if total else "",
+             empty="No member of this group is in another group."),
     ]
 
 
@@ -315,40 +326,49 @@ def fig_trend(me, f, grain: str = "day") -> go.Figure:
     fig = go.Figure()
     fig.add_bar(x=days, y=me.values, marker_color=t["series"][0],
                 hovertemplate="$%{y:,.2f}<extra></extra>")
-    fig.update_yaxes(tickprefix="$", title_text=f"est. USD / {grain}")
+    theme.usd_axis(fig, "y", title_text=f"est. USD / {grain}")
     fig.update_layout(bargap=0.25)
     return apply(fig, mode, height=300, time_axis=True, showlegend=False, hover=True)
 
 
-def fig_donut(w, p, cost, mode, col: str, kind: str, top: int = 8) -> go.Figure:
-    """Where this principal's estimated spend went, split by one column."""
-    df = usage.q(f"""SELECT {col} AS k, SUM({cost}) v, COUNT(*) n FROM gateway_events
-                     WHERE {w} AND {p} AND {col} IS NOT NULL AND {col} <> ''
+def fig_split(w, p, cost, mode, col: str, kind: str, top: int = 8) -> go.Figure:
+    """Where this principal's estimated spend went, split by one column.
+
+    Bars, not a donut: with several models the slices were too thin to read or
+    tell apart, and a bar carries its name and figure on the axis.
+    """
+    k = dim_sql(col)
+    df = usage.q(f"""SELECT {k} AS k, SUM({cost}) v, COUNT(*) n FROM gateway_events
+                     WHERE {w} AND {p} AND {k} IS NOT NULL AND {k} <> ''
                      GROUP BY 1 ORDER BY v DESC""")
     df = df[df.v > 0]
     if df.empty:
         return empty_fig(mode, "No estimated spend in this view")
     t = theme.TOKENS[mode]
     head, rest = df.head(top), df.v.iloc[top:].sum()
-    labels = head.k.tolist()
-    colors = [theme.color(kind, k, mode) for k in labels]
+    labels = [str(x) for x in head.k]
+    colors = [theme.color(kind, lab, mode) for lab in labels]
     values = head.v.tolist()
     if rest > 0:
         labels, colors, values = labels + ["Other"], colors + [t["muted"]], values + [rest]
     total = sum(values)
-    fig = go.Figure(go.Pie(
-        labels=labels, values=values, hole=0.58, sort=False,
-        marker={"colors": colors, "line": {"color": t["surface"], "width": 2}},
-        textinfo="percent", textposition="inside", insidetextorientation="horizontal",
-        textfont={"color": "#ffffff", "size": 14},
-        hovertemplate="%{label}<br>$%{value:,.2f} \u00b7 %{percent}<extra></extra>",
+    # plotly draws the first bar at the bottom; reverse so the biggest is on top
+    labels, colors, values = labels[::-1], colors[::-1], values[::-1]
+    fig = go.Figure(go.Bar(
+        x=values, y=[lab[:28] for lab in labels], orientation="h", width=0.6,
+        marker={"color": colors},
+        # The share alone: the card is a third of the page, and a model name
+        # plus "$59.21 \u00b7 50%" ran off its edge. Hover has the dollars.
+        text=[f"\u00a0{v / total:.0%}" for v in values],
+        textposition="outside", textfont={"color": t["ink"], "size": 13},
+        customdata=[f"{lab}\n{fmt_usd(v)} \u00b7 {v / total:.1%}" for lab, v in zip(labels, values)],
+        hoverinfo="none",  # the name follows the mouse; see nametip
     ))
-    apply(fig, mode, height=300, showlegend=True, hover=True)
-    fig.update_layout(
-        margin={"l": 8, "r": 8, "t": 8, "b": 8},
-        legend={"orientation": "h", "yanchor": "top", "y": -0.02, "x": 0.5, "xanchor": "center"},
-    )
-    return fig
+    fig.update_layout(meta="nametip")
+    fig.update_yaxes(type="category")
+    fig.update_xaxes(range=[0, max(values) * 1.3], showticklabels=False)
+    return apply(fig, mode, height=max(200, 34 * len(labels) + 60), showlegend=False,
+                 hover=True)
 
 
 VIA_SLOT = {"viewer": 0, "owner": 3, "authenticated": 2}
@@ -357,7 +377,10 @@ VIA_SLOT = {"viewer": 0, "owner": 3, "authenticated": 2}
 def fig_relation(rel: dict, mode: str) -> go.Figure:
     df = rel["df"]
     if df.empty or not df.est_spend_usd.sum():
-        return empty_fig(mode, "Nothing here in this view")
+        msg = rel.get("empty", "Nothing here in this view")
+        if not df.empty:
+            msg = f"No estimated spend: {len(df):,} {rel['label']}s, all on unpriced models"
+        return empty_fig(mode, msg)
     t = theme.TOKENS[mode]
     top = df.head(12).iloc[::-1]
     labels = [str(x)[:40] for x in top[rel["label"]]]
@@ -379,7 +402,7 @@ def fig_relation(rel: dict, mode: str) -> go.Figure:
         )
     fig.update_layout(barmode="overlay")
     fig.update_yaxes(type="category", categoryorder="array", categoryarray=labels)
-    fig.update_xaxes(range=[0, top.est_spend_usd.max() * 1.3], title_text="est. USD")
+    theme.usd_axis(fig, range=[0, top.est_spend_usd.max() * 1.3], title_text="est. USD")
     return apply(fig, mode, height=max(200, 26 * len(top) + 70),
                  showlegend=any(v for v, _ in groups), hover=True)
 
@@ -411,7 +434,9 @@ def panel():
         ),
         ui.output_ui("pf_header"),
         ui.output_ui("pf_kpis"),
-        ui.div(ui.navset_underline(
+        # Hidden until something is picked: with no principal of the kind in view
+        # (no sessions, say) the tabs were rows of empty cards under the note.
+        ui.panel_conditional("input.pf_pick", ui.div(ui.navset_underline(
             ui.nav_panel(
                 "Spending",
                 ui.card(
@@ -445,6 +470,14 @@ def panel():
             ),
             ui.nav_panel(
                 "Connections",
+                ui.p(
+                    "What this principal's spend is tied to. A user: the content "
+                    "they used and their Workbench sessions. Content: the users it "
+                    "was charged to and their groups. A session: its owner's other "
+                    "sessions and projects. A group: its members and the other "
+                    "groups they share.",
+                    class_="pf-note pf-tab-note",
+                ),
                 # Charts in one row and tables in the next, so a short chart never
                 # leaves its neighbour's table floating at the bottom of a tall card.
                 ui.layout_columns(
@@ -499,7 +532,7 @@ def panel():
                     ),
                 ),
             ),
-        ), class_="pf-tabs"),
+        ), class_="pf-tabs")),
     )
 
 
@@ -548,6 +581,15 @@ def server(input, ctx: PageContext, records_sql):
 
     @render.ui
     def pf_header():
+        kind = input.pf_kind()
+        if peers().empty:
+            why = {
+                "session": " A session is known only when Workbench names it in the "
+                           "Gateway-Metadata header (workbench-session-id), and no "
+                           "request in view carries one.",
+                "group": " Groups come from Connect; none of the users in view is in one.",
+            }.get(kind, "")
+            return empty_note(f"No {NOUN[kind]}s in this view.{why}")
         e = ent()
         info = identity(e.kind, e.key, e.w, e.cost)
         n = len(e.peers)
@@ -559,9 +601,12 @@ def server(input, ctx: PageContext, records_sql):
         if e.kind == "user":
             sub = info["email"] or "user"
             via = info["via"]
-            tot = via.s.sum() or 1
+            tot = via.s.fillna(0).sum()
+            # Shares of spend; with none priced (all unpriced models) there is
+            # no share to give, only how they were charged.
             facts.append(("charged as", " \u00b7 ".join(
-                f"{v} {s / tot:.0%}" for v, s in zip(via.via, via.s))))
+                f"{v} {s / tot:.0%}" if tot and not theme.missing(s) else str(v)
+                for v, s in zip(via.via, via.s))))
             facts.append(("Connect groups", chips(info["groups"]) or "none found"))
         elif e.kind == "content":
             sub = e.key
@@ -603,7 +648,8 @@ def server(input, ctx: PageContext, records_sql):
     def pf_kpis():
         e = ent()
         s = stats(e.w, e.p, e.cost)
-        cache = (s.cr / s.tin) if s.tin else 0
+        cr = 0 if theme.missing(s.cr) else s.cr
+        cache = None if theme.missing(s.tin) or not s.tin else cr / s.tin
         cv = convs()
         if cv.empty:
             conv = theme.stat_tile(f"Conversation cost (p{HIGH_PCT:g})", DASH,
@@ -659,7 +705,8 @@ def server(input, ctx: PageContext, records_sql):
         return ui.layout_columns(
             theme.stat_tile("Estimated spend", card_usd(s.spend),
                             f"{card_num(s.requests)} requests"),
-            theme.stat_tile("Cache hit", f"{cache:.0%}", "of input read from the prompt cache"),
+            theme.stat_tile("Cache hit", theme.fmt_pct(None if cache is None else 100 * cache),
+                            "of input read from the prompt cache"),
             conv,
             ctx,
             col_widths=[2, 2, 4, 4], class_="kpi-row",
@@ -674,17 +721,17 @@ def server(input, ctx: PageContext, records_sql):
     @render_widget
     def pf_models():
         e = ent()
-        return fig_donut(e.w, e.p, e.cost, e.f["mode"], "model", "model")
+        return fig_split(e.w, e.p, e.cost, e.f["mode"], "model", "model")
 
     @render_widget
     def pf_providers():
         e = ent()
-        return fig_donut(e.w, e.p, e.cost, e.f["mode"], "provider", "provider")
+        return fig_split(e.w, e.p, e.cost, e.f["mode"], "provider", "provider")
 
     @render_widget
     def pf_origins():
         e = ent()
-        return fig_donut(e.w, e.p, e.cost, e.f["mode"], "source", "origin")
+        return fig_split(e.w, e.p, e.cost, e.f["mode"], "source", "origin")
 
     @reactive.calc
     def rels() -> list[dict]:
