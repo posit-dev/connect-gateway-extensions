@@ -72,6 +72,29 @@ Like Connect, the mock wants an API key on every request. Models the catalog
 does not price cost $0 against either backend; the mock's `gpt-5` traffic is
 one such model.
 
+## Backfill a real Connect with demo usage
+
+`demo/backfill_agave.py` fills a real Connect's gateway usage log with synthetic
+usage for a demo server. It reads the server's users, content and prices through
+the API (`CONNECT_SERVER`, `CONNECT_API_KEY`), so every GUID in a row resolves
+when the dashboard calls Connect. It writes JSONL files in the layout Connect
+uses for its own usage log, under a node name of its own.
+
+```bash
+python demo/backfill_agave.py --out /tmp/backfill
+tar -C /tmp/backfill -cf - . | kubectl -n <ns> exec -i <connect-pod> -c connect -- \
+  tar -C /var/lib/rstudio-connect/gateway -xf -
+```
+
+To remove the data, delete the `node=<node>` directories (the default node is
+`agave-site-connect-backfill`). The node name is the only mark of the rows.
+
+A running dashboard only merges recently ingested records, and the backfilled
+rows have older ingest times. It shows them after its next full reload (every 24
+hours), or sooner if you change its `GATEWAY_FROM` or `GATEWAY_TO` setting,
+which restarts it with a full reload. A pinned `GATEWAY_FROM` hides rows before
+it.
+
 ## Develop
 
 ```bash
