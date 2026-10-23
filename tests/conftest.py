@@ -252,9 +252,9 @@ def f(loaded) -> dict:
     c = app.catalog()
     start, end = app.preset_range(app.DEFAULT_PRESET, c["start"], c["end"])
     return {
-        "start": start, "end": end, "all_providers": c["providers"], "all_models": c["models"],
-        "all_users": c["users"], "all_contents": c["contents"], "providers": [],
-        "models": [], "users": [], "contents": [], "sessions": [], "meta": [],
+        "start": start, "end": end,
+        "all_users": c["users"], "all_contents": c["contents"], "groups": [],
+        "users": [], "contents": [], "sessions": [], "meta": [],
         "mode": "dark",
     }
 

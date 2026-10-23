@@ -52,10 +52,11 @@ def where(f: dict, extra: str = "") -> str:
         conds.append(sql_in("content_guid", f["contents"]))
     if f["sessions"]:
         conds.append(sql_in("workbench_session_id", f["sessions"]))
-    if f["providers"] and set(f["providers"]) != set(f["all_providers"]):
-        conds.append(sql_in("provider", f["providers"]))
-    if f["models"] and set(f["models"]) != set(f["all_models"]):
-        conds.append(sql_in("model", f["models"]))
+    # A Connect group is its members: a request counts when its user is in any
+    # of the picked groups.
+    if f["groups"]:
+        conds.append("user_guid IN (SELECT user_guid FROM user_groups WHERE "
+                     f"{sql_in('group_guid', f['groups'])})")
     # Values of one key are alternatives; separate keys all have to match.
     by_key: dict[str, list[str]] = {}
     for pick in f["meta"]:

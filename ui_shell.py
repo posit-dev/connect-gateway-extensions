@@ -38,17 +38,6 @@ def brand() -> ui.Tag:
     )
 
 
-def model_choices(models: list[str]) -> dict[str, str]:
-    """Checkbox labels for the model filter.
-
-    The export carries records whose model name is an empty string — a failed
-    call that never reached a model, usually. As a checkbox that would draw a
-    blank row, so it is named. The value is left as-is so the filter still
-    selects exactly those records.
-    """
-    return {m: (m if m else "(no model recorded)") for m in models}
-
-
 def empty_note(msg: str) -> ui.Tag:
     """Why a table is empty. An empty grid alone reads as a broken panel."""
     return ui.div(msg, class_="empty-note")
@@ -84,8 +73,7 @@ FILTER_HELP = {
     "users": "Gateway users.",
     "content": "Connect content items.",
     "session": "Workbench sessions.",
-    "provider": "The model provider that served the call.",
-    "models": "The model that handled the call.",
+    "groups": "Connect groups: a request counts when its user is in any picked group.",
     "meta": "Key/value labels the caller attached to the request.",
 }
 
@@ -211,7 +199,6 @@ def _shell(
             ),
             class_="topbar-load",
         ),
-        ui.input_dark_mode(id="dark_mode", mode="dark"),
         class_="topbar",
     )
     strip = ui.div(

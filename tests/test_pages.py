@@ -92,28 +92,6 @@ def test_conversation_summary_splits_the_two_camps():
     assert "Too few to split" in few and "normal" not in few
 
 
-def test_spend_by_principal_export_lists_every_user_and_content_item(loaded, f):
-    df = principals.principal_spend(filters.where(f), pricing.est_cost())
-    assert df.columns.tolist() == [
-        "kind", "id", "name", "email", "owner", "requests", "tokens", "est_spend_usd"]
-    assert set(df.kind) == {"user", "content"}
-    where = filters.where(f)
-    for kind, col in (("user", "username"), ("content", "content_guid")):
-        part = df[df.kind == kind]
-        assert set(part.id) == set(loaded.q(
-            f"SELECT DISTINCT {col} AS id FROM gateway_events "
-            f"WHERE {where} AND {col} IS NOT NULL AND {col} <> ''").id)
-        assert part.requests.sum() == loaded.scalar(
-            f"SELECT COUNT(*) FROM gateway_events WHERE {where} AND {col} IS NOT NULL")
-        assert part.est_spend_usd.sum() == pytest.approx(loaded.scalar(
-            f"SELECT SUM({pricing.est_cost()}) FROM gateway_events "
-            f"WHERE {where} AND {col} IS NOT NULL"), abs=0.01)
-    # Every user's email is filled in; content gets an owner instead.
-    assert df[df.kind == "user"].email.notna().all()
-    assert df[df.kind == "content"].email.isna().all()
-    assert df.est_spend_usd.tolist() == sorted(df.est_spend_usd, reverse=True)
-
-
 def test_principals_panel_outputs():
     html = str(ui.TagList(ui.navset_tab(principals.panel(), id="main_tabs")))
     assert 'data-value="Profiles"' in html
@@ -122,7 +100,6 @@ def test_principals_panel_outputs():
         "pf_models", "pf_providers", "pf_origins",
         "dl_pf_records", "pf_rel_0_chart", "dl_pf_rel_1",
         "pf_conv_by", "pf_conv_summary", "pf_conv_spend", "pf_conv_help", "dl_pf_conv_groups",
-        "dl_principal_spend",
     ):
         assert f'id="{output_id}"' in html
 
@@ -141,7 +118,6 @@ def test_principals_exports_use_raw_data_sql(loaded, f, make_ctx):
     assert {name: filename for name, (_, filename) in exports.items()} == {
         "pf_rel_0": "pf_connections_1.csv", "pf_rel_1": "pf_connections_2.csv",
         "pf_conv_groups": "profile_conversation_groups.csv",
-        "principal_spend": "spend_by_principal.csv",
     }
     assert sql_exports["pf_records"][1] == "profile_records.csv"
 
@@ -246,9 +222,12 @@ def test_raw_data_records_follow_the_filter(loaded, f, make_ctx):
                       f"WHERE {filters.where(f)}"), abs=0.1)  # each row is rounded to 4 places
     assert everything.response_id.is_unique  # no row is repeated by the grid's joins
 
-    f["models"] = [everything.model.dropna().iloc[0]]
+    group = loaded.q("SELECT group_guid FROM user_groups ORDER BY 1 LIMIT 1").group_guid[0]
+    members = set(loaded.q(f"""SELECT DISTINCT username FROM gateway_events WHERE user_guid IN
+        (SELECT user_guid FROM user_groups WHERE group_guid = '{group}')""").username)
+    f["groups"] = [group]
     narrowed = export()
-    assert set(narrowed.model) == set(f["models"])
+    assert set(narrowed.username) <= members
     assert 0 < len(narrowed) < len(everything)
     # The builder principals reuse takes any predicate, and caps nothing itself.
     assert "LIMIT" not in records_sql("TRUE")

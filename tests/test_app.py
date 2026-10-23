@@ -28,7 +28,7 @@ def test_ui_has_every_page_and_output(loaded):
         "model_time", "cache_savings_time", "cache_rate_time",
         "errors_time", "dl_adoption",
         "records_table", "records_title", "records_capped", "dl_records",
-        "pf_kind", "pf_pick", "pf_kpis", "dl_principal_spend",
+        "pf_kind", "pf_pick", "pf_kpis",
     ):
         assert f'id="{output_id}"' in html
     pages = ["Overview", "Profiles", "Adoption", "Raw Data"]
@@ -66,7 +66,7 @@ def test_shiny_run_serves_page_and_session(fake_connect, tmp_path):
         # Every element is reported visible, so no output stays suspended.
         data: dict[str, object] = {f".clientdata_output_{i}_hidden": False
                                    for i in set(re.findall(r'\bid="([^"]+)"', html))}
-        data.update(main_tabs="Overview", preset="30d", dark_mode="dark")
+        data.update(main_tabs="Overview", preset="30d")
 
         async def session():
             values, errors = set(), {}

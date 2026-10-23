@@ -36,7 +36,7 @@ from pricing import est_cost, est_cost_uncached
 from theme import card_usd
 from ui_shell import (
     FAVICON, NAV_FIRST, NAV_SECTIONS, _drawer, _shell, brand,
-    filter_label, model_choices, nav_rail_ui, plural,
+    filter_label, nav_rail_ui, plural,
 )
 
 PRESETS = {
@@ -59,12 +59,6 @@ def catalog() -> dict:
     return {
         "start": usage.scalar("SELECT MIN(day) FROM gateway_events").date(),
         "end": usage.scalar("SELECT MAX(day) FROM gateway_events").date(),
-        "models": usage.q("SELECT DISTINCT model FROM gateway_events ORDER BY 1")[
-            "model"
-        ].tolist(),
-        "providers": usage.q("SELECT DISTINCT provider FROM gateway_events ORDER BY 1")[
-            "provider"
-        ].tolist(),
         "users": usage.q("""SELECT DISTINCT username FROM gateway_events
                          WHERE username IS NOT NULL ORDER BY 1""")["username"].tolist(),
         # Choice labels for the user picker: the username, and the email beside
@@ -103,6 +97,13 @@ def catalog() -> dict:
                                       MAX(content_owner_username) AS owner
                                FROM gateway_events WHERE content_guid IS NOT NULL
                                GROUP BY 1 ORDER BY 1"""))
+        },
+        # Connect groups: the guid is the value, the name and size the label.
+        "group_labels": {
+            r.guid: f"{r.name} \u00b7 {r.members:,} members"
+            for r in usage.rows(usage.q("""SELECT group_guid AS guid, MAX(group_name) AS name,
+                                      COUNT(DISTINCT user_guid) AS members
+                               FROM user_groups GROUP BY 1 ORDER BY 2, 1"""))
         },
         "meta": meta_choices(),
         "statuses": usage.q("""SELECT DISTINCT CAST(status_code AS VARCHAR) status
@@ -184,8 +185,7 @@ FILTERS = {
     "users": (ui.update_selectize, lambda c: c["user_labels"]),
     "contents": (ui.update_selectize, lambda c: c["content_labels"]),
     "sessions": (ui.update_selectize, lambda c: c["session_labels"]),
-    "providers": (ui.update_checkbox_group, lambda c: c["providers"]),
-    "models": (ui.update_checkbox_group, lambda c: model_choices(c["models"])),
+    "groups": (ui.update_selectize, lambda c: c["group_labels"]),
     "meta": (ui.update_checkbox_group, lambda c: c["meta"]),
 }
 
@@ -227,17 +227,12 @@ def app_ui(request: Request | None):
                 multiple=True,
                 options={"placeholder": "all sessions \u2014 type a name or id"},
             )),
-            # Provider and Models both start with nothing checked, which shows
-            # everything: checking boxes narrows the view, and "clear" gets back
-            # to all of it in one click.
-            with_clear("providers", ui.input_checkbox_group(
-                "f_providers", filter_label("Provider", "provider"), CATALOG["providers"],
-            )),
-            # A checkbox group, like Provider: the model list is short enough to
-            # show in full, and seeing every value at once is what tells a reader
-            # what the data covers. A search box hid that behind typing.
-            with_clear("models", ui.input_checkbox_group(
-                "f_models", filter_label("Models", "models"), model_choices(CATALOG["models"]),
+            with_clear("groups", ui.input_selectize(
+                "f_groups",
+                filter_label("Connect groups", "groups"),
+                CATALOG["group_labels"],
+                multiple=True,
+                options={"placeholder": "all groups \u2014 type a group name"},
             )),
             # Metadata the caller set on the request (team, cost-center, ...).
             # Keys Workbench writes itself (workbench-*) are not offered.
@@ -257,6 +252,9 @@ def app_ui(request: Request | None):
         ),
         id="main_tabs",
         header=ui.head_content(
+            # Dark only: Bootstrap and styles.css read the theme from this
+            # attribute, set before the page paints so it never flashes light.
+            ui.tags.script("document.documentElement.setAttribute('data-bs-theme', 'dark');"),
             ui.tags.link(rel="preconnect", href="https://fonts.googleapis.com"),
             ui.tags.link(
                 rel="preconnect", href="https://fonts.gstatic.com", crossorigin=""
@@ -371,7 +369,6 @@ def server(input, output, session):
         ui.update_navset("main_tabs", selected=_LEGACY_TABS.get(tab, NAV_FIRST))
 
     _BOOKMARKABLE_INPUTS = {
-        "dark_mode",
         "preset",
         "date_range",
         "pf_kind",
@@ -381,8 +378,7 @@ def server(input, output, session):
         "f_users",
         "f_contents",
         "f_sessions",
-        "f_providers",
-        "f_models",
+        "f_groups",
         "f_meta",
         "main_tabs",
     }
@@ -531,11 +527,7 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.clear_all)
     async def _clear_all():
-        """Everything back to the state a first-time visitor sees, URL included.
-
-        Dark mode is left alone: it is how someone reads the page, not part of
-        what the page is showing.
-        """
+        """Everything back to the state a first-time visitor sees, URL included."""
         ui.update_radio_buttons("preset", selected=DEFAULT_PRESET)
         c = cat()
         s, e = preset_range(DEFAULT_PRESET, c["start"], c["end"])
@@ -564,17 +556,14 @@ def server(input, output, session):
         return {
             "start": start,
             "end": end,
-            "all_providers": c["providers"],
-            "all_models": c["models"],
             "all_users": c["users"],
             "all_contents": c["contents"],
-            "providers": list(input.f_providers() or []),
-            "models": list(input.f_models() or []),
+            "groups": list(input.f_groups() or []),
             "users": list(input.f_users() or []),
             "contents": list(input.f_contents() or []),
             "sessions": list(input.f_sessions() or []),
             "meta": list(input.f_meta() or []),
-            "mode": input.dark_mode() or "dark",
+            "mode": "dark",
         }
 
     # ---- unpriced check: the topbar warning ----------------------------------

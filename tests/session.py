@@ -168,17 +168,17 @@ def browser_inputs(html: str) -> dict[str, object]:
         inputs[name] = value
     box = html[html.index('id="date_range"'):]
     inputs["date_range"] = re.findall(r'data-initial-date="([^"]+)"', box)[:2]
-    for name in ("f_users", "f_contents", "f_sessions", "f_providers", "f_models", "f_meta"):
-        inputs[name] = []
-    for name in ("f_providers", "f_models", "f_meta"):  # checkbox groups: the ticked ones
-        inputs[name] = [
-            html_unescape(v) for v in re.findall(
-                rf'<input type="checkbox" name="{name}" value="([^"]*)" checked', html)
-        ]
+    for name in ("f_users", "f_contents", "f_sessions", "f_groups"):  # selects: the selected
+        box = re.search(rf'<select[^>]*id="{name}"[^>]*>(.*?)</select>', html, re.S)
+        inputs[name] = [html_unescape(v) for v in re.findall(
+            r'<option value="([^"]*)" selected', box.group(1) if box else "")]
+    inputs["f_meta"] = [  # a checkbox group: the ticked ones
+        html_unescape(v) for v in re.findall(
+            r'<input type="checkbox" name="f_meta" value="([^"]*)" checked', html)
+    ]
     active = re.search(
         r'data-value="([^"]+)"[^>]*class="nav-link active"[^>]*href="#tab-main_tabs-', html)
     inputs["main_tabs"] = active.group(1) if active else "Overview"
-    inputs["dark_mode"] = "dark"
     # The Profiles picker starts empty and the server fills it; a browser
     # reports the empty value, and without it the choices never load.
     inputs["pf_pick"] = ""

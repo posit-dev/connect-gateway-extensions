@@ -422,8 +422,7 @@ def f() -> dict:
     return {
         "start": date(2026, 9, 1), "end": date(2026, 9, 30),
         "users": [], "all_users": [], "contents": [], "all_contents": [],
-        "sessions": [], "providers": [], "all_providers": [], "models": [],
-        "all_models": [], "meta": [],
+        "sessions": [], "groups": [], "meta": [],
     }
 
 

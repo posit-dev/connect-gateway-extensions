@@ -139,37 +139,6 @@ def peer_values(peers: pd.DataFrame, col: str) -> pd.Series:
     return vals[vals > 0]
 
 
-def principal_spend(w: str, cost: str) -> pd.DataFrame:
-    """One row per user and per content item in view, with its spend.
-
-    Unpriced traffic is kept (spend $0, requests counted): the point is a
-    complete list, not only the ones with a price.
-    """
-    parts = []
-    for dim, kind, extra in [
-        ("username", "user", "MAX(user_email)"),
-        ("content_guid", "content", "MAX(content_owner_username)"),
-    ]:
-        df = usage.q(f"""SELECT {dim} AS id, {extra} AS detail, COUNT(*) AS requests,
-                                COALESCE(SUM({TOKEN_COUNT}), 0) AS tokens,
-                                COALESCE(SUM({cost}), 0) AS est_spend_usd
-                         FROM gateway_events
-                         WHERE {w} AND {dim} IS NOT NULL AND {dim} <> ''
-                         GROUP BY 1""")
-        df.insert(0, "kind", kind)
-        df.insert(2, "name", [
-            str(i) if kind == "user" else (usage.content_name(i) or "")
-            for i in df.id
-        ])
-        # What the second column means depends on the kind.
-        df = df.rename(columns={"detail": "email" if kind == "user" else "owner"})
-        parts.append(df)
-    cols = ["kind", "id", "name", "email", "owner", "requests", "tokens", "est_spend_usd"]
-    out = pd.concat(parts, ignore_index=True).reindex(columns=cols)
-    out["est_spend_usd"] = out.est_spend_usd.round(4)
-    return out.sort_values(["est_spend_usd", "requests"], ascending=False, ignore_index=True)
-
-
 def peer_label(kind: str, r) -> str:
     if kind == "user":
         return str(r.k)
@@ -527,27 +496,6 @@ def panel():
                 ),
                 class_="pf-pick",
             ),
-            # Every user and every content item with its spend, for an admin to
-            # take into another tool. Not tied to the kind or the pick.
-            ui.div(
-                export_button("dl_principal_spend", "Export spend by principal"),
-                help_icon(
-                    "Spend by principal",
-                    ui.p(
-                        "A CSV with one row per user and one per content item in "
-                        "view: its kind (user or content), id, name, requests, "
-                        "tokens and estimated spend, largest first. It follows the "
-                        "date range and filters."
-                    ),
-                    ui.p(
-                        "A request from content is charged to both the content item "
-                        "and a user, so the user rows and the content rows each add "
-                        "up to their own total; do not add the two together.",
-                        class_="mb-0",
-                    ),
-                ),
-                class_="hdr-flex-left ms-auto",
-            ),
             class_="page-switch",
         ),
         ui.output_ui("pf_header"),
@@ -903,9 +851,6 @@ def server(input, ctx: PageContext, records_sql):
         lambda: records_sql(f"{ent().w} AND {ent().p}"),
         "profile_records.csv",
     )
-
-    register_export("principal_spend", lambda: principal_spend(where(flt()), est_cost()),
-                    "spend_by_principal.csv")
 
 
 # What each view of the conversation chart measures, for its help.

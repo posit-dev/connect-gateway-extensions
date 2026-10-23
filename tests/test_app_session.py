@@ -110,14 +110,17 @@ def test_the_records_grid_lists_every_row_newest_first(app_server):
     assert reply.values["records_capped"] is None  # under the grid's cap
 
 
-@pytest.mark.parametrize("models", [[], ["claude-sonnet-4-6", "gpt-5"]], ids=["all", "two-models"])
-def test_spend_and_tokens_agree_across_pages(app_server, loaded, f, models):
+@pytest.mark.parametrize("narrow", [False, True], ids=["all", "two-groups"])
+def test_spend_and_tokens_agree_across_pages(app_server, loaded, f, narrow):
     """The same filter gives the same totals on the Overview, the top bar and every CSV."""
     import filters
     import pricing
 
+    groups = loaded.q("SELECT DISTINCT group_guid FROM user_groups ORDER BY 1").group_guid
+    groups = groups.head(2).tolist() if narrow else []
+
     async def scenario(session: Session, first: Reply, html: str):
-        reply = first if not models else await session.update(f_models=models)
+        reply = first if not groups else await session.update(f_groups=groups)
         return {
             "reply": reply,
             "records": session.download("dl_records"),
@@ -126,8 +129,7 @@ def test_spend_and_tokens_agree_across_pages(app_server, loaded, f, models):
     got = visit(app_server, scenario)
     reply: Reply = got["reply"]
     assert reply.errors == {}
-    if models:
-        f["models"] = models
+    f["groups"] = groups
     where = filters.where(f)
     total = loaded.scalar(f"SELECT SUM({pricing.est_cost()}) FROM gateway_events WHERE {where}")
     requests = loaded.scalar(f"SELECT COUNT(*) FROM gateway_events WHERE {where}")
@@ -174,18 +176,16 @@ def test_refresh_reloads_in_the_background_and_says_so(app_server):
 def test_csv_downloads_are_registered_and_streamed(app_server):
     async def scenario(session: Session, first: Reply, html: str):
         return first, {k: session.download(k)
-                       for k in ("dl_adoption", "dl_records", "dl_principal_spend")}
+                       for k in ("dl_adoption", "dl_records")}
 
     reply, files = visit(app_server, scenario)
     assert sorted(k for k in reply.values if k.startswith("dl_")) == [
         "dl_adoption", "dl_pf_conv_groups",
-        "dl_pf_records", "dl_pf_rel_0", "dl_pf_rel_1", "dl_principal_spend", "dl_records",
+        "dl_pf_records", "dl_pf_rel_0", "dl_pf_rel_1", "dl_records",
     ]
     for name, body in files.items():
         rows = csv_rows(body)
         assert rows, f"{name} is empty"
-    assert files["dl_principal_spend"].splitlines()[0] == (
-        "kind,id,name,email,owner,requests,tokens,est_spend_usd")
 
 
 def test_unpriced_models_are_warned_about_in_the_top_bar(app_server, loaded, f):
@@ -198,16 +198,20 @@ def test_unpriced_models_are_warned_about_in_the_top_bar(app_server, loaded, f):
     assert len(unpriced) == 1, "the fake Connect should leave exactly one model unpriced"
     model, requests = unpriced.model[0], int(unpriced.requests[0])
 
+    # A user who never called the unpriced model.
+    priced = loaded.q(f"""SELECT username FROM gateway_events WHERE {filters.where(f)}
+        AND username IS NOT NULL GROUP BY 1
+        HAVING COUNT(*) FILTER (WHERE model = '{model}') = 0 ORDER BY 1 LIMIT 1""").username
+
     async def scenario(session: Session, first: Reply, html: str):
-        priced = [m for m in f["all_models"] if m != model][:1]
-        return first, await session.update(f_models=priced)
+        return first, await session.update(f_users=priced.tolist())
 
     everything, priced_only = visit(app_server, scenario)
     html = everything.values["topbar_status"]["html"]
     assert "\u26a0 1 unpriced model" in html
     assert f"<code>{model}</code>" in html
     assert f"{requests:,} requests" in html
-    # Narrowed to a priced model, there is nothing to warn about.
+    # Narrowed to someone who only used priced models, there is nothing to warn about.
     assert "unpriced" not in priced_only.values["topbar_status"]["html"]
 
 
@@ -230,24 +234,25 @@ class TestBookmark:
         (url,) = reply.query_strings()
         assert set(bookmark_query(url)) == {
             "_inputs_", "preset", "grain", "group_by", "pf_kind", "pf_pick", "date_range",
-            "f_users", "f_contents", "f_sessions", "f_providers", "f_models", "f_meta",
-            "dark_mode", "main_tabs",
+            "f_users", "f_contents", "f_sessions", "f_groups", "f_meta",
+            "main_tabs",
         }
         assert len(url) < 500  # a server refuses a request line past 8 KB; stay far inside
         assert json.loads(bookmark_query(url)["main_tabs"][0]) == "Adoption"
 
-    def test_url_state_round_trips(self, app_server):
-        picks = ["claude-opus-4-8", "claude-haiku-4-5"]
+    def test_url_state_round_trips(self, app_server, loaded):
+        picks = loaded.q("SELECT DISTINCT group_guid FROM user_groups ORDER BY 1"
+                         ).group_guid.head(2).tolist()
 
         async def save(session: Session, first: Reply, html: str):
-            reply = await session.update(main_tabs="Adoption", f_models=picks, preset="7d",
+            reply = await session.update(main_tabs="Adoption", f_groups=picks, preset="7d",
                                          date_range=["2026-10-10", "2026-10-16"])
             return reply
 
         saved = visit(app_server, save)
         (url,) = saved.query_strings()
         query = bookmark_query(url)
-        assert json.loads(query["f_models"][0]) == picks
+        assert json.loads(query["f_groups"][0]) == picks
         assert json.loads(query["preset"][0]) == "7d"
 
         # A new visitor opens the saved address, sending the page's own defaults.
@@ -280,9 +285,11 @@ class TestBookmark:
         assert reply.errors == {}
         assert re.search(r'nav-item active"[^>]*>Overview</button>', reply.values["nav_rail"]["html"])
 
-    def test_clear_all_empties_the_filters_and_the_url(self, app_server):
+    def test_clear_all_empties_the_filters_and_the_url(self, app_server, loaded):
+        user = loaded.scalar("SELECT MIN(username) FROM gateway_events")
+
         async def scenario(session: Session, first: Reply, html: str):
-            narrowed = await session.update(f_models=["gpt-5"])
+            narrowed = await session.update(f_users=[user])
             cleared = await session.update(clear_all=1)
             return narrowed, cleared
 
@@ -293,4 +300,4 @@ class TestBookmark:
         # reports the new values, as it would for a person clearing them.
         updates = [m for msg in cleared.messages for m in msg.get("inputMessages", [])]
         emptied = {m["id"] for m in updates if m["message"].get("value") == []}
-        assert {"f_models", "f_providers", "f_meta"} <= emptied
+        assert {"f_groups", "f_users", "f_meta"} <= emptied
