@@ -261,3 +261,20 @@ body.drawer-open .filter-drawer {
 }
 .pf-note { color: var(--text-secondary); font-size: 0.82rem; margin-bottom: 6px; }
 
+
+/* Shown over the page until the server has drawn the first views. */
+.first-load {
+  position: fixed; inset: 0; z-index: 2000; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 14px;
+  background: var(--page); color: var(--text-secondary); font-size: 0.9rem;
+  transition: opacity 0.25s;
+}
+.first-load.done { opacity: 0; pointer-events: none; }
+.first-load-bar {
+  width: 220px; height: 4px; overflow: hidden; border-radius: 2px; background: var(--track);
+}
+.first-load-bar::after {
+  content: ""; display: block; width: 40%; height: 100%; border-radius: 2px;
+  background: var(--accent); animation: first-load-slide 1.2s ease-in-out infinite;
+}
+@keyframes first-load-slide { from { margin-left: -40%; } to { margin-left: 100%; } }

@@ -308,7 +308,7 @@ def conversations(w: str, p: str, cost: str) -> pd.DataFrame:
                date_diff('second', MIN(ts), MAX(ts)) / 60.0 AS minutes,
                COUNT(*) AS turns, SUM(cost) AS est,
                MAX(input_tokens) AS peak_context,
-               100.0 * SUM(cache_read_tokens) / NULLIF(SUM(input_tokens), 0) AS cache_pct,
+               SUM(input_tokens - cache_read_tokens) AS cache_miss_tokens,
                SUM(CASE WHEN status_code <> 200 THEN 1 ELSE 0 END) AS errors,
                SUM(CASE WHEN finish_reason = 'tool_use' THEN 1 ELSE 0 END) AS tool_calls,
                mode(model) AS model,
@@ -805,7 +805,7 @@ def server(input, ctx: PageContext, records_sql):
         # the frame conv_keys groups
         df = df.assign(main_model=df.main_model.fillna(df.model), calls=df.turns,
                        duration_min=df.minutes.clip(lower=0.5),
-                       cache_hit=df.cache_pct / 100, peak_input=df.peak_context)
+                       cache_miss=df.cache_miss_tokens, peak_input=df.peak_context)
         key, order = conv_tools.conv_keys(df, conv_by())
         groups = conv_tools.conv_groups(df, key, order)
         return SimpleNamespace(df=df, key=key, order=order, groups=groups)
@@ -862,7 +862,9 @@ CONV_VIEW_HELP = {
     "turns": "Turns: the number of requests in the conversation.",
     "pace": "Pace: the typical (median) pause between a conversation's requests. "
             "Single-request conversations have no pause and are left out.",
-    "cache": "Caching: the share of the conversation's input read from the prompt cache.",
+    "cache": "Cache misses: the input tokens, summed over all the conversation's requests, "
+             "that were not read from the prompt cache (fresh input and cache writes). "
+             "A long conversation that keeps missing the cache sits far right.",
     "tool": "Each conversation counts under the harness it spent most through, read "
             "from the User-Agent header.",
 }

@@ -12,7 +12,7 @@ def test_grouping_by_model_and_pace():
         "high": [False] * 19 + [True],
         "calls": list(range(1, 21)),
         "duration_min": [1.0] * 20,
-        "cache_hit": [0.0] * 20,
+        "cache_miss": [0.0] * 20,
         "peak_input": [50_000.0] * 20,
         "med_idle": [None] + [3.0] * 19,
     })
@@ -40,7 +40,7 @@ def test_grouping_by_peak_context():
         "high": [False] * 20,
         "calls": list(range(1, 21)),
         "duration_min": [1.0] * 20,
-        "cache_hit": [0.0] * 20,
+        "cache_miss": [0.0] * 20,
         "peak_input": [float(x) for x in range(10_000, 210_000, 10_000)],
     })
     key, order = conversations.conv_keys(df, "context")
@@ -58,7 +58,7 @@ def _curve_frame(high: list[bool]) -> pd.DataFrame:
         "high": high,
         "calls": list(range(1, n + 1)),
         "duration_min": [1.0] * n,
-        "cache_hit": [0.5] * n,
+        "cache_miss": [5_000.0] * n,
         # the costly conversations are the big ones
         "peak_input": [200_000.0 if h else 10_000.0 * (i + 1) for i, h in enumerate(high)],
         "med_idle": [0.0] + [3.0] * (n - 1),

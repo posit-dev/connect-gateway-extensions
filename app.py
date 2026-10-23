@@ -269,6 +269,24 @@ def app_ui(request: Request | None):
             ui.tags.link(rel="icon", type="image/svg+xml", href="favicon.svg"),
             ui.include_css(Path(__file__).parent / "www" / "styles.css"),
             ui.include_css(Path(__file__).parent / "www" / "shell.css"),
+            # A loading bar over the page until the first views are drawn. The
+            # first session is slow; shiny:idle fires once the server has no
+            # work left, which is when the page is ready to look at.
+            ui.tags.script(
+                """
+                document.addEventListener("DOMContentLoaded", function () {
+                  var o = document.createElement("div");
+                  o.className = "first-load";
+                  o.innerHTML = '<div class="first-load-bar"></div><div>Loading usage data\u2026</div>';
+                  document.body.appendChild(o);
+                  function hide() {
+                    o.classList.add("done");
+                    setTimeout(function () { o.remove(); }, 400);
+                  }
+                  $(document).one("shiny:idle shiny:disconnected", hide);
+                });
+                """
+            ),
             # A tiny label that follows the mouse over bars and donut slices.
             # Plotly's own tooltip anchors at the end of a bar and lands on its
             # value, so those charts turn it off (hoverinfo none) and mark
