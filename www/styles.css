@@ -390,12 +390,6 @@ body .card-body shiny-data-frame .shiny-data-grid {
 
 /* ---- one question per row ------------------------------------------------ */
 .question-block { margin-bottom: 10px; }
-.row-question {
-  color: var(--text-primary);
-  font-size: 1rem;
-  font-weight: 600;
-  margin: 20px 2px 10px;
-}
 /* Filled with the accent rather than outlined: an outlined circle on the gray
    --page canvas reads as an artifact, not as something to click. */
 .help-icon {
@@ -450,10 +444,9 @@ body .card-body shiny-data-frame .shiny-data-grid {
   padding: 8px 2px 2px;
 }
 
-/* Conversations: the one-line readings under a chart. */
+/* Profiles: the one-line readings under a chart. */
 .card-note {
   color: var(--text-muted);
   font-size: 0.85rem;
   padding: 6px 14px 8px;
 }
-.conv-one { margin-bottom: 12px; }

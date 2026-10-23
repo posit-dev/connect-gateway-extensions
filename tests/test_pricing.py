@@ -27,16 +27,11 @@ EVENTS = """(VALUES
 
 @pytest.fixture(scope="module")
 def priced() -> list[tuple]:
-    """(billed, uncached, sum of per-part rates) for each EVENTS row."""
-    parts = pricing._build_rate_parts(PRICES)
+    """(billed, uncached) for each EVENTS row."""
     with duckdb.connect() as con:
         return con.sql(f"""SELECT
             {pricing._build_est_cost(PRICES)} AS billed,
-            {pricing._build_est_cost(PRICES, uncached=True)} AS uncached,
-            ({parts['i']} * (input_tokens - cache_read_tokens - cache_creation_tokens)
-             + {parts['o']} * output_tokens
-             + {parts['cw']} * cache_creation_tokens
-             + {parts['cr']} * cache_read_tokens) AS parts
+            {pricing._build_est_cost(PRICES, uncached=True)} AS uncached
             FROM {EVENTS}""").fetchall()
 
 
@@ -49,13 +44,3 @@ def test_price_ladder(priced):
 
 def test_uncached_charges_cache_tokens_at_the_input_rate(priced):
     assert [round(r[1], 2) for r in priced] == [4.0, 8.8, 6.4, 4.0, 0]
-
-
-def test_per_part_rates_add_up_to_the_estimate(priced):
-    for billed, _, summed in priced:
-        assert billed == pytest.approx(summed)
-
-
-def test_model_rates_prefers_anthropic_base_rate():
-    assert pricing._model_rates(PRICES, "o'hare") == (2e-6, 10e-6, 3e-6, 0.5e-6)
-    assert pricing._model_rates(PRICES, "unknown") is None

@@ -1,7 +1,7 @@
-"""Attribution page: users, content and sessions ranked by spend, with outliers.
+"""Top Spenders page: users, content and sessions ranked by spend, with outliers.
 
-Picking an outlier in the table opens it on the Principals tab, through the
-`open_profile` callback the Principals server returns.
+Picking an outlier in the table opens it on the Profiles tab, through the
+`open_profile` callback the Profiles server returns.
 """
 
 from typing import cast
@@ -24,8 +24,8 @@ from ui_shell import empty_note, help_icon, page_header, table_header
 
 def panel():
     return ui.nav_panel(
-        "Attribution",
-        page_header("Attribution"),
+        "Top Spenders",
+        page_header("Top Spenders"),
         ui.div(
             ui.span("Show", class_="strip-label"),
             ui.div(
@@ -428,7 +428,7 @@ def server(input, ctx: PageContext, open_profile):
             selection_mode="row",
         )
 
-    # Picking an outlier opens it on the Principals tab.
+    # Picking an outlier opens it on the Profiles tab.
     @reactive.effect
     @reactive.event(attr_table.cell_selection)
     def _attr_open():

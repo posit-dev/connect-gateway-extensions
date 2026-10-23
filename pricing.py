@@ -61,9 +61,7 @@ def _build_case(prices: dict, term) -> str:
 
     The CASE tries the most specific branch first: the request's own region,
     then the provider's base rate for the model, then -- for a provider the
-    catalog does not price -- the model's Anthropic rate, then $0. est_cost and
-    the per-part rates (rate_sql) share this ladder, so the parts always add up
-    to the estimate.
+    catalog does not price -- the model's Anthropic rate, then $0.
     """
     region_whens, base_whens, model_default = [], [], {}
 
@@ -97,44 +95,6 @@ def _build_case(prices: dict, term) -> str:
 # cause a wrong hit, but an `is` test on the object cannot.
 _EST_COST_CACHE: tuple = (object(), "")
 _NOCACHE_COST_CACHE: tuple = (object(), "")
-_RATES_CACHE: tuple = (object(), {})
-
-# The four prices a request pays, in the order the catalog stores them.
-RATE_PARTS = ("i", "o", "cw", "cr")
-
-
-def rate_sql() -> dict[str, str]:
-    """USD per token for each part (fresh input, output, cache write, cache read).
-
-    Each is a SQL expression over provider, region and model only, so it can be
-    evaluated once per distinct model rather than once per row.
-    """
-    global _RATES_CACHE
-    prices = _prices()
-    if _RATES_CACHE[0] is not prices:
-        _RATES_CACHE = (prices, _build_rate_parts(prices))
-    return _RATES_CACHE[1]
-
-
-def _build_rate_parts(prices: dict) -> dict[str, str]:
-    """rate_sql for one price catalog, uncached."""
-    return {
-        p: _build_case(prices, lambda *r, k=k: f"{float(r[k])}")
-        for k, p in enumerate(RATE_PARTS)
-    }
-
-
-def model_rates(model: str) -> tuple | None:
-    """(input, output, cache write, cache read) in USD per token for a model's
-    base list rate, Anthropic's first, or None when the catalog has no price."""
-    return _model_rates(_prices(), model)
-
-
-def _model_rates(prices: dict, model: str) -> tuple | None:
-    """model_rates for one price catalog."""
-    hits = {p: r for (p, region, m), r in prices.items() if m == model and not region}
-    rates = hits.get("anthropic") or next(iter(hits.values()), None)
-    return tuple(v / 1e6 for v in rates) if rates else None
 
 
 def est_cost_uncached() -> str:

@@ -44,8 +44,6 @@ def where(f: dict, extra: str = "") -> str:
         f"ts >= TIMESTAMP '{f['start']} 00:00:00'",
         f"ts <= TIMESTAMP '{f['end']} 23:59:59.999'",
     ]
-    if f["source"] != "both":
-        conds.append(f"source = {sql_str(f['source'])}")
     if f["users"] and set(f["users"]) != set(f["all_users"]):
         conds.append(sql_in("username", f["users"]))
     # Applies to every origin. A Workbench call has a null content_guid, so

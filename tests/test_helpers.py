@@ -378,18 +378,6 @@ def test_unknown_buckets_are_gray(mode):
     assert theme.color("origin", "connect", mode) != muted
 
 
-@pytest.mark.parametrize("mode", ["dark", "light"])
-def test_heatmap_scale_starts_empty_and_ends_strongest(mode):
-    scale = theme.seq_colorscale(mode)
-    # Zero is the grid colour, so an empty hour reads as nothing.
-    assert scale[0] == [0.0, theme.TOKENS[mode]["grid"]]
-    assert scale[-1][0] == pytest.approx(1.0)
-    stops = [s for s, _ in scale]
-    assert stops == sorted(stops) and len(set(stops)) == len(stops)
-    # The top of the scale is the ramp's strongest end in either mode.
-    assert scale[-1][1] == theme.TOKENS[mode]["seq"][-1]
-
-
 def test_empty_fig_wraps_a_long_reason():
     fig = theme.empty_fig("dark", "word " * 40)
     assert "<br>" in fig.layout.annotations[0].text
@@ -408,11 +396,8 @@ def test_conv_groups_of_no_conversations_still_make_a_table():
 
 # ---- table_format.pretty_columns --------------------------------------------------
 def test_pretty_columns_renames_known_and_spaces_the_rest():
-    df = pd.DataFrame(columns=["est_spend_usd", "cache_pct", "p95_ms", "pct_of_total",
-                               "error_pct", "cache_savings_usd", "input_tokens", "user"])
-    assert list(pretty_columns(df).columns) == [
-        "estimated spend (usd)", "cache %", "p95 latency (ms)", "% of total",
-        "error %", "cache savings (usd)", "input tokens", "user"]
+    df = pd.DataFrame(columns=["est_spend_usd", "peak_p75", "user"])
+    assert list(pretty_columns(df).columns) == ["estimated spend (usd)", "peak p75", "user"]
 
 
 def test_pretty_columns_does_not_mutate_its_input():
@@ -425,7 +410,7 @@ def test_pretty_columns_does_not_mutate_its_input():
 @pytest.fixture
 def f() -> dict:
     return {
-        "start": date(2026, 9, 1), "end": date(2026, 9, 30), "source": "both",
+        "start": date(2026, 9, 1), "end": date(2026, 9, 30),
         "users": [], "all_users": [], "contents": [], "all_contents": [],
         "sessions": [], "providers": [], "all_providers": [], "models": [],
         "all_models": [], "meta": [],

@@ -47,7 +47,7 @@ import pandas as pd
 
 random.seed(7)
 PORT = int(os.environ.get("MOCK_CONNECT_PORT", 3940))
-DAYS = 30  # the dashboard loads 30 days, so generate exactly that
+DAYS = 90  # the dashboard loads 90 days, so generate exactly that
 
 # Enough rows that the Overview's 2,000-row table cap is visibly a cap.
 ROWS = int(os.environ.get("FAKE_ROWS", 160000))
@@ -87,14 +87,14 @@ USERS = [(f"{f}.{l}", f"{f}.{l}@example.com", uuid.uuid4().hex) for f, l in _PEO
 CONTENT = [uuid.uuid4().hex for _ in range(14)]
 # Content 0 is a runaway: three times the traffic of any other. Content 1 is a
 # heavy one: ordinary traffic, but every request is a very large prompt. That
-# gives the Attribution page one "high spend" and one "high cost per request"
+# gives the Top Spenders page one "high spend" and one "high cost per request"
 # content outlier.
 CONTENT_W = [4.0, 1.0] + [1.0] * 12
 # Who owns each content item: spread across the heavy users.
 CONTENT_OWNER = [i % 12 for i in range(len(CONTENT))]
 CONTENT_TOKEN_X = {1: 12}
 # Content that never asks for prompt caching: every turn re-sends its history at
-# the full input price. The Conversations tab's "no prompt caching" lever.
+# the full input price.
 CONTENT_NO_CACHE = {4, 7}
 # Anthropic's default prompt cache lives this long after its last use.
 CACHE_TTL = 300

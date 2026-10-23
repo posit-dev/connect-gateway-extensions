@@ -1,4 +1,4 @@
-"""Conversation grouping, cost-driver definitions, and spend visualizations.
+"""Conversation grouping and spend visualizations.
 
 These functions consume dataframes and never read Shiny inputs or query DuckDB.
 """
@@ -15,7 +15,7 @@ from theme import apply, empty_fig
 # ---- higher-cost flag ---------------------------------------------------------
 # A conversation is higher-cost when it costs more than HIGH_PCT percent of the
 # same principal's conversations. Below MIN_BASELINE conversations a percentile
-# is just the most expensive one, so nothing is flagged. Principals uses these
+# is just the most expensive one, so nothing is flagged. Profiles uses these
 # too; they live here so that module can import this one without a cycle.
 HIGH_PCT = 75
 MIN_BASELINE = 20
@@ -39,28 +39,7 @@ def higher_cost(
     return pd.DataFrame({"high": high, "line": line})
 
 
-# ---- cost drivers -----------------------------------------------------------
-# The Conversations tab breaks each conversation's cost into things someone can
-# change. All of them are read from request metadata alone: token counts, the
-# order and timing of a conversation's requests, model, status, finish reason.
-#
-# Anthropic's default prompt cache lives 5 minutes from its last use. A request
-# that arrives later than that finds it gone and writes the whole history again.
-CACHE_TTL_SECONDS = 300
-# A conversation whose typical pause is this short, over at least
-# AGENT_MIN_CALLS requests, is being driven by a program rather than a person.
-AGENT_GAP_SECONDS = 20
-AGENT_MIN_CALLS = 20
-# The turn limit the agent-loop lever proposes.
-AGENT_TURN_CAP = 100
-# "Quick" for the model lever: the conversation's whole length in requests.
-QUICK_MAX_CALLS = 5
-# A conversation is "higher cost" above this percentile of all conversations in
-# view. The same cut as the Principals tab's per-user HIGH_PCT; this one is
-# taken over the whole population, that one over a principal's own.
-CONV_HIGH_PCT = HIGH_PCT
-# The context-length lever's compaction point, in input tokens per request.
-COMPACT_AT = 100_000
+# ---- grouping -----------------------------------------------------------------
 # What the conversation spend chart can group by.
 CONV_BY = {
     "context": "Peak context", "model": "Model", "duration": "Duration", "turns": "Turns",
@@ -336,55 +315,4 @@ def _band_labels(vals: pd.Series, edges: list, kind: str, say) -> list[str]:
         else:
             labels.append(span(say(lo), say(hi)))
     return labels
-
-# Each lever: key (also the savings column, sav_<key>), name, how the saving is
-# estimated, and what to do about it. Levers can apply to the same request, so
-# their savings overlap and are never summed.
-LEVERS = [
-    (
-        "rewarm", "Cache expired mid-conversation",
-        f"A request that came more than {CACHE_TTL_SECONDS // 60} minutes after the "
-        "previous one ended found the prompt cache gone, and paid to write the "
-        "history again. Saving: those re-written tokens priced as cache reads.",
-        "Use the 1-hour cache for long interactive sessions, or start a fresh "
-        "conversation after a break instead of resuming a long one.",
-    ),
-    (
-        "context", "Context past the compaction point",
-        "Input above the compaction threshold, priced at what that request paid "
-        "per input token. An upper bound: it ignores the cost of the summary "
-        "a compaction makes.",
-        "Compact or clear history sooner (/compact in Claude Code, or a history "
-        "window in the app).",
-    ),
-    (
-        "uncached", "No prompt caching",
-        "Requests that carried the previous turn's history with no cache read "
-        "or write, on a model that offers caching. Saving: that history priced "
-        "as a cache read, less the premium for writing the new part.",
-        "Turn on prompt caching in the client or app (cache_control on the "
-        "system prompt and history).",
-    ),
-    (
-        "model", "Quick chats on a pricier model",
-        f"Conversations of {QUICK_MAX_CALLS} requests or fewer on a model listed "
-        "above the comparison model, repriced at the comparison model's rates.",
-        "Make the comparison model the default for short chats; keep the "
-        "bigger model for long work.",
-    ),
-    (
-        "waste", "Failed or cut-off requests",
-        "The full estimated cost of requests that failed (HTTP 4xx/5xx) or "
-        "stopped at the output limit, which callers usually re-run.",
-        "Fix the failing callers; raise max_tokens where answers are cut off.",
-    ),
-    (
-        "loop", "Agent loops past the turn cap",
-        f"Conversations paced like a program (median pause \u2264 "
-        f"{AGENT_GAP_SECONDS}s over {AGENT_MIN_CALLS}+ requests). Saving: every "
-        f"request after turn {AGENT_TURN_CAP}.",
-        "Give autonomous agents a turn or budget limit.",
-    ),
-]
-LEVER_NAME = {k: name for k, name, *_ in LEVERS}
 

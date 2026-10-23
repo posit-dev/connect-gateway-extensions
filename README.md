@@ -29,7 +29,7 @@ Connect sets both variables for content that it runs, so a deployed copy needs
 no setup. To run the app on your machine, set both variables yourself.
 
 Two optional variables pin the export window. Without them, the window trails
-the clock by 30 days.
+the clock by 90 days.
 
 - `GATEWAY_FROM` — the start of the window, in RFC 3339 UTC, for example
   `2026-09-10T00:00:00Z`.
@@ -109,14 +109,14 @@ defines the page order.
 Each page lives in its own module and exposes `panel()`, its `nav_panel`, and
 `server(input, ctx)`:
 
-- `pages/overview.py`, `pages/attribution.py`, `pages/conversations.py`,
-  `pages/adoption.py`, `pages/models.py` and `pages/raw_data.py`.
-- `principals.py` is the Principals page. It takes Raw Data's SQL builder and
-  returns `open_profile`, which Attribution uses to open a pick on Principals.
+- `pages/overview.py`, `pages/attribution.py`, `pages/adoption.py` and
+  `pages/raw_data.py`.
+- `principals.py` is the Profiles page. It takes Raw Data's SQL builder and
+  returns `open_profile`, which Top Spenders uses to open a pick on Profiles.
 
 `pages/context.py` defines `PageContext`, the explicit set of shared services a
 page server receives in place of importing `app.py`: `flt`, `cat`, `where`,
-`est_cost`, `register_export`, `total_bars`, `formatted` and the rest.
+`est_cost`, `register_export`, `formatted` and the rest.
 
 The helper modules hold no Shiny session state:
 
@@ -126,12 +126,12 @@ The helper modules hold no Shiny session state:
   after a refresh.
 - `filters.py` turns the filter dict into a SQL `WHERE` clause and quotes
   values. It also holds `TOKEN_COUNT`, the SQL for a row's token count.
-- `conversations.py` groups requests into conversations, computes cost
-  drivers from data frames, and holds the higher-cost flag (`HIGH_PCT`,
-  `higher_cost`) that Conversations and Principals share.
+- `conversations.py` groups requests into conversations from data frames,
+  and holds the higher-cost flag (`HIGH_PCT`, `higher_cost`) that Profiles
+  and Top Spenders use.
 - `ui_shell.py` holds the navigation rail, the filter drawer and shared page
   components.
-- `table_format.py` holds the column labels of the summary tables and
+- `table_format.py` holds the column labels of the tables and
   `GUID_LABEL_CHARS`, how much of a guid a chart label keeps.
 - `theme.py` holds the chart styling, palette and stat tiles.
 

@@ -16,20 +16,15 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 
-from session import Reply, Session, browser_inputs, fetch_page, open_session, run
+from session import Reply, Session, browser_inputs, fetch_page, figure_traces, open_session, run
 
-# The outputs each page renders on first view. Principals shows nothing until a
-# principal is picked, and Conversations' detail nothing until a row is, so they
-# are not listed.
+# The outputs each page renders on first view. Profiles shows nothing until a
+# principal is picked, so it is not listed.
 PAGE_OUTPUTS = {
-    "Overview": ["kpis", "provider_total", "model_time", "origin_total", "origin_share",
-                 "provider_share", "model_share"],
-    "Adoption": ["adoption_kpis", "adoption_lines", "adoption_table", "tool_time",
-                 "usage_heatmap"],
-    "Models": ["model_kpis", "models_bars", "models_adoption", "cache_savings_time",
-               "cache_rate_time", "latency_time", "errors_time", "models_table"],
-    "Attribution": ["attr_kpis", "attr_bars", "attr_scatter", "attr_table"],
-    "Conversations": ["conv_kpis", "conv_spend_by", "conv_spend_note", "top_sessions"],
+    "Overview": ["kpis", "spend_time", "cache_savings_time",
+                 "cache_rate_time", "errors_time"],
+    "Adoption": ["adoption_kpis", "adoption_lines", "tool_time", "model_time"],
+    "Top Spenders": ["attr_kpis", "attr_bars", "attr_scatter", "attr_table"],
     "Raw Data": ["records_table", "records_title"],
     "Shell": ["nav_rail", "topbar_meta", "topbar_status"],
 }
@@ -87,6 +82,25 @@ def test_every_page_renders_without_errors(app_server):
             assert reply.values.get(output_id) is not None, f"{page}: {output_id} has no value"
 
 
+def test_adoption_content_toggle_relabels_the_page(app_server):
+    async def scenario(session: Session, first: Reply, html: str):
+        return await session.update(adoption_kind="content")
+
+    reply = visit(app_server, scenario)
+    assert reply.errors == {}
+    assert reply.values["adoption_lines_title"] == "Active content items over time"
+    assert "Weekly active content items" in reply.values["adoption_kpis"]["html"]
+    for out in ("adoption_lines", "tool_time"):
+        assert reply.values.get(out) is not None, out
+
+
+def test_overview_starts_ungrouped_as_one_series_of_the_whole_spend(app_server):
+    reply = visit(app_server, first_view)
+    assert reply.errors == {}
+    (trace,) = figure_traces(reply, "spend_time")
+    assert trace["name"] == "Estimated spend"
+
+
 def test_the_records_grid_lists_every_row_newest_first(app_server):
     reply = visit(app_server, first_view)
     grid = reply.values["records_table"]["payload"]
@@ -108,7 +122,6 @@ def test_spend_and_tokens_agree_across_pages(app_server, loaded, f, models):
         return {
             "reply": reply,
             "records": session.download("dl_records"),
-            "models": session.download("dl_models"),
         }
 
     got = visit(app_server, scenario)
@@ -134,18 +147,6 @@ def test_spend_and_tokens_agree_across_pages(app_server, loaded, f, models):
     assert sum(float(r["est_cost_usd"] or 0) for r in records) == pytest.approx(total, abs=0.1)
     assert sum(int(r["tok_in"] or 0) for r in records) == loaded.scalar(
         f"SELECT SUM(input_tokens) FROM gateway_events WHERE {where}")
-
-    # The Models CSV leaves out requests that name no model, and nothing else.
-    named = f"{where} AND model IS NOT NULL AND model <> ''"
-    by_model = csv_rows(got["models"])
-    assert sum(float(r["est_spend_usd"]) for r in by_model) == pytest.approx(loaded.scalar(
-        f"SELECT SUM({pricing.est_cost()}) FROM gateway_events WHERE {named}"))
-    assert sum(int(r["requests"]) for r in by_model) == loaded.scalar(
-        f"SELECT COUNT(*) FROM gateway_events WHERE {named}")
-    assert sum(int(float(r["output_tokens"])) for r in by_model) == sum(
-        int(r["tok_out"] or 0) for r in records if r["model"])
-    if models:
-        assert {r["model"] for r in by_model} == set(models)
 
 
 def test_refresh_reloads_in_the_background_and_says_so(app_server):
@@ -174,19 +175,18 @@ def test_refresh_reloads_in_the_background_and_says_so(app_server):
 def test_csv_downloads_are_registered_and_streamed(app_server):
     async def scenario(session: Session, first: Reply, html: str):
         return first, {k: session.download(k)
-                       for k in ("dl_adoption", "dl_models", "dl_attr", "dl_conversations",
+                       for k in ("dl_adoption", "dl_attr",
                                  "dl_records", "dl_principal_spend")}
 
     reply, files = visit(app_server, scenario)
     assert sorted(k for k in reply.values if k.startswith("dl_")) == [
-        "dl_adoption", "dl_attr", "dl_conversations", "dl_models", "dl_pf_conv_groups",
+        "dl_adoption", "dl_attr", "dl_pf_conv_groups",
         "dl_pf_records", "dl_pf_rel_0", "dl_pf_rel_1", "dl_principal_spend", "dl_records",
     ]
     for name, body in files.items():
         rows = csv_rows(body)
         assert rows, f"{name} is empty"
     assert "est_spend_usd" in files["dl_attr"].splitlines()[0]
-    assert files["dl_conversations"].splitlines()[0].startswith("conversation_id")
     assert files["dl_principal_spend"].splitlines()[0] == (
         "kind,id,name,email,owner,requests,tokens,est_spend_usd")
 
@@ -222,30 +222,29 @@ class TestBookmark:
     WIDGET_STATE = {
         "records_table_data_view_rows": list(range(2000)),
         "records_table_cell_selection": {"type": "none"},
-        "models_table_selected_rows": list(range(500)),
-        "model_time_state": {"layout": "x" * 3000},
+        "spend_time_state": {"layout": "x" * 3000},
         "attr_table_data_view_selected": list(range(500)),
     }
 
     def test_the_url_names_filter_inputs_only_and_stays_short(self, app_server):
         async def scenario(session: Session, first: Reply, html: str):
-            return await session.update(main_tabs="Models", **self.WIDGET_STATE)
+            return await session.update(main_tabs="Adoption", **self.WIDGET_STATE)
 
         reply = visit(app_server, scenario)
         (url,) = reply.query_strings()
         assert set(bookmark_query(url)) == {
-            "_inputs_", "preset", "grain", "attr_kind", "pf_kind", "pf_pick", "date_range",
+            "_inputs_", "preset", "grain", "group_by", "attr_kind", "pf_kind", "pf_pick", "date_range",
             "f_users", "f_contents", "f_sessions", "f_providers", "f_models", "f_meta",
             "dark_mode", "main_tabs",
         }
         assert len(url) < 500  # a server refuses a request line past 8 KB; stay far inside
-        assert json.loads(bookmark_query(url)["main_tabs"][0]) == "Models"
+        assert json.loads(bookmark_query(url)["main_tabs"][0]) == "Adoption"
 
     def test_url_state_round_trips(self, app_server):
         picks = ["claude-opus-4-8", "claude-haiku-4-5"]
 
         async def save(session: Session, first: Reply, html: str):
-            reply = await session.update(main_tabs="Models", f_models=picks, preset="7d",
+            reply = await session.update(main_tabs="Adoption", f_models=picks, preset="7d",
                                          date_range=["2026-10-10", "2026-10-16"])
             return reply
 
@@ -261,14 +260,21 @@ class TestBookmark:
         assert restored.values["topbar_meta"]["html"] == saved.values["topbar_meta"]["html"]
         assert pill_texts(restored) == pill_texts(saved)
         assert tiles(restored, "kpis") == tiles(saved, "kpis")
-        assert re.search(r'nav-item active"[^>]*>Models</button>', restored.values["nav_rail"]["html"])
+        assert re.search(r'nav-item active"[^>]*>Adoption</button>', restored.values["nav_rail"]["html"])
 
-    def test_a_bookmark_from_a_renamed_tab_still_opens_a_page(self, app_server):
-        query = f"?_inputs_&main_tabs={quote(json.dumps('Audit log'))}"
+    @pytest.mark.parametrize("old, new", [
+        ("Audit log", "Raw Data"), ("Models", "Overview"),
+        ("Attribution", "Top Spenders"), ("Principals", "Profiles"),
+    ])
+    def test_a_bookmark_from_a_renamed_tab_still_opens_a_page(self, app_server, old, new):
+        query = f"?_inputs_&main_tabs={quote(json.dumps(old))}"
 
         reply = visit(app_server, first_view, url=query)
         assert reply.errors == {}
-        assert len(re.findall(r'nav-item active"', reply.values["nav_rail"]["html"])) == 1
+        # The browser is told to switch to the page that took the old one's place.
+        selected = [x["message"].get("value") for m in reply.messages
+                    for x in m.get("inputMessages") or [] if x.get("id") == "main_tabs"]
+        assert selected == [new]
 
     def test_a_bookmark_naming_no_tab_opens_the_first_page(self, app_server):
         query = f"?_inputs_&main_tabs={quote(json.dumps('Nonesuch'))}"

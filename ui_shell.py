@@ -7,7 +7,6 @@ import re
 from pathlib import Path
 
 from shiny import ui
-from shinywidgets import output_widget
 
 
 WWW = Path(__file__).parent.resolve() / "www"
@@ -104,35 +103,28 @@ def filter_label(text: str, key: str) -> ui.Tag:
     )
 
 
-def table_header(title: str | ui.Tag, dl_id: str, help: ui.Tag | None = None) -> ui.CardItem:
+def export_button(dl_id: str, label: str = "Export CSV") -> ui.Tag:
+    """A CSV download for a card header. The CSV holds the rows behind the chart."""
+    return ui.download_button(dl_id, label, class_="btn-sm export-btn")
+
+
+def table_header(
+    title: str | ui.Tag, dl_id: str, help: ui.Tag | None = None, label: str = "Export CSV"
+) -> ui.CardItem:
     """Card header with a right-aligned CSV export button, and an optional ?."""
     return ui.card_header(
         ui.div(
             ui.div(ui.span(title), help, class_="hdr-flex-left") if help else ui.span(title),
-            ui.download_button(dl_id, "Export CSV", class_="btn-sm export-btn"),
+            export_button(dl_id, label),
             class_="hdr-flex",
         )
-    )
-
-
-def chart_row(question, bars_id: str, share_id: str, share_title: str = "Share") -> ui.Tag:
-    """One question, answered over the whole range: totals as bars, and the split
-    of those totals as a donut."""
-    return ui.div(
-        ui.h6(question, class_="row-question"),
-        ui.layout_columns(
-            ui.card(ui.card_header("Total"), output_widget(bars_id)),
-            ui.card(ui.card_header(share_title), output_widget(share_id)),
-            col_widths=[7, 5],
-        ),
-        class_="question-block",
     )
 
 
 # The nav rail: section label, then the pages under it. A page's value is its
 # title (what `ui.nav_panel` uses when it is given no explicit value).
 NAV_SECTIONS = [
-    ("Gateway", ["Overview", "Adoption", "Models", "Attribution", "Conversations", "Principals", "Raw Data"]),
+    ("Gateway", ["Overview", "Adoption", "Top Spenders", "Profiles", "Raw Data"]),
 ]
 NAV_FIRST = NAV_SECTIONS[0][1][0]
 

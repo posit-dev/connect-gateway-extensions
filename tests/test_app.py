@@ -18,27 +18,22 @@ from conftest import ROOT, _free_port
 def test_ui_has_every_page_and_output(loaded):
     import app
     import pricing
-    from pages import conversations as conversations_page
 
     assert app.est_cost is pricing.est_cost
-    assert conversations_page.rate_sql is pricing.rate_sql
     html = str(app.app_ui(None))
     for output_id in (
         "main_tabs", "date_range", "f_users",
-        "kpis", "origin_tool", "origin_total", "origin_share", "provider_total",
-        "provider_share", "grain", "model_time", "model_share",
-        "adoption_kpis", "adoption_lines", "tool_time", "usage_heatmap",
-        "models_bars", "models_adoption", "cache_savings_time", "latency_time",
-        "errors_time", "models_table", "dl_adoption", "dl_models",
+        "kpis", "group_by", "grain", "spend_time",
+        "adoption_kind", "adoption_kpis", "adoption_lines", "tool_time",
+        "model_time", "cache_savings_time", "cache_rate_time",
+        "errors_time", "dl_adoption",
         "records_table", "records_title", "records_capped", "dl_records",
         "attr_kind", "attr_kpis", "attr_bars", "attr_metric",
         "attr_scatter", "attr_table", "dl_attr",
-        "conv_kpis", "conv_by", "conv_spend_by", "conv_spend_note",
-        "conv_detail", "top_sessions", "dl_conversations",
     ):
         assert f'id="{output_id}"' in html
-    pages = ["Overview", "Attribution", "Conversations", "Principals",
-             "Adoption", "Models", "Raw Data"]
+    pages = ["Overview", "Top Spenders", "Profiles",
+             "Adoption", "Raw Data"]
     positions = [html.index(f'data-value="{p}"') for p in pages]
     assert positions == sorted(positions)
 
@@ -92,8 +87,8 @@ def test_shiny_run_serves_page_and_session(fake_connect, tmp_path):
 
         values, errors = asyncio.run(session())
         assert errors == {}
-        for output_id in ("topbar_status", "kpis", "attr_table", "conv_kpis",
-                          "pf_header", "adoption_kpis", "models_table",
+        for output_id in ("topbar_status", "kpis", "attr_table",
+                          "pf_header", "adoption_kpis",
                           "records_table", "dl_records"):
             assert output_id in values
     finally:

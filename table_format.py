@@ -1,5 +1,5 @@
-"""Labels shared by tables and charts: summary-table column names and how much
-of a guid a chart label keeps."""
+"""Labels shared by tables and charts: table column names and how much of a
+guid a chart label keeps."""
 
 import pandas as pd
 
@@ -8,12 +8,5 @@ GUID_LABEL_CHARS = 8
 
 
 def pretty_columns(df: pd.DataFrame) -> pd.DataFrame:
-    nice = {
-        "est_spend_usd": "estimated spend (usd)",
-        "cache_savings_usd": "cache savings (usd)",
-        "cache_pct": "cache %",
-        "error_pct": "error %",
-        "pct_of_total": "% of total",
-        "p95_ms": "p95 latency (ms)",
-    }
+    nice = {"est_spend_usd": "estimated spend (usd)"}
     return df.rename(lambda x: nice.get(x, x.replace("_", " ")), axis="columns")

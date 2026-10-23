@@ -9,6 +9,7 @@ would be given, without a browser.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import urllib.request
@@ -17,6 +18,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+import numpy as np
 import websockets
 
 # A reply ends when the app reports idle. Output values can still arrive just
@@ -52,7 +54,8 @@ def figure_traces(reply: Reply, output_id: str) -> list[dict]:
     """The traces of the plotly figure a widget output was given.
 
     The output's value names a widget model; the figure arrives separately, as
-    the state of a shinywidgets comm whose ident is that model's id.
+    the state of a shinywidgets comm whose ident is that model's id. Numeric
+    arrays travel beside the state as base64 buffers; they are put back as lists.
     """
     model = reply.values[output_id]["model_id"]
     for m in reply.messages:
@@ -60,7 +63,15 @@ def figure_traces(reply: Reply, output_id: str) -> list[dict]:
         if opened:
             msg = json.loads(opened)
             if msg.get("ident") == f"comm-{model}":
-                return msg["content"]["data"]["state"]["_data"]
+                data = msg["content"]["data"]
+                # Each path ends in "buffer", a key of the {dtype, shape} array.
+                for path, buf in zip(data["buffer_paths"], msg["buffers"]):
+                    node = data["state"]
+                    for key in path[:-2]:
+                        node = node[key]
+                    dtype = node[path[-2]]["dtype"]
+                    node[path[-2]] = np.frombuffer(base64.b64decode(buf), dtype).tolist()
+                return data["state"]["_data"]
     raise AssertionError(f"no figure sent for {output_id}")
 
 
@@ -168,7 +179,7 @@ def browser_inputs(html: str) -> dict[str, object]:
         r'data-value="([^"]+)"[^>]*class="nav-link active"[^>]*href="#tab-main_tabs-', html)
     inputs["main_tabs"] = active.group(1) if active else "Overview"
     inputs["dark_mode"] = "dark"
-    # The Principals picker starts empty and the server fills it; a browser
+    # The Profiles picker starts empty and the server fills it; a browser
     # reports the empty value, and without it the choices never load.
     inputs["pf_pick"] = ""
     return inputs

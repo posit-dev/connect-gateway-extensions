@@ -39,15 +39,6 @@ TOKENS = {
             "#6b5ca5",
             "#a8577f",
         ],
-        "seq": [
-            "#e3eef8",
-            "#c2dbf0",
-            "#9cc3e4",
-            "#74a9d6",
-            "#4d8ac2",
-            "#2f6ba3",
-            "#1c4d78",
-        ],
     },
     "dark": {
         "surface": "#131a2b",
@@ -67,15 +58,6 @@ TOKENS = {
             "#22c1dc",
             "#eab308",
             "#ef4444",
-        ],
-        "seq": [
-            "#1c4d78",
-            "#2f6ba3",
-            "#4d8ac2",
-            "#74a9d6",
-            "#9cc3e4",
-            "#c2dbf0",
-            "#e3eef8",
         ],
     },
 }
@@ -139,26 +121,6 @@ def color(kind: str, name: str, mode: str) -> str:
         _UNLISTED[(kind, name)] = sum(1 for k, _ in _UNLISTED if k == kind)
     slot = _UNLISTED[(kind, name)]
     return series[(len(order) + slot) % len(series)]
-
-
-def seq_colorscale(mode: str):
-    """Low to high, for a heatmap whose minimum is zero.
-
-    Zero is the grid colour, so an empty cell reads as "nothing" rather than as
-    the first step of the scale. The ramp then runs faint to strong: dark blue
-    to near-white on the dark card, near-white to dark blue on the light one.
-    """
-    ramp = TOKENS[mode]["seq"]
-    # The light ramp's first step is as pale as the light grid; start one step
-    # in, so the smallest real value still reads as "something".
-    if mode == "light":
-        ramp = ramp[1:]
-    n = len(ramp) - 1
-    # Any value above zero starts at the first step, a hair above the empty cell.
-    eps = 1e-6
-    return [[0.0, TOKENS[mode]["grid"]], [eps, ramp[0]]] + [
-        [eps + (1 - eps) * i / n, c] for i, c in enumerate(ramp) if i
-    ]
 
 
 def usd_axis(fig: go.Figure, axis: str = "x", **kw) -> go.Figure:

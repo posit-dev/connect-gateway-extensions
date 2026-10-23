@@ -64,7 +64,7 @@
 }
 .nav-ico { width: 14px; text-align: center; font-size: 0.8rem; opacity: 0.85; }
 
-/* Sub-tabs inside a page (Principals). Scoped to .pf-tabs: Bootstrap's own
+/* Sub-tabs inside a page (Profiles). Scoped to .pf-tabs: Bootstrap's own
    `.nav-item` on the tab <li> must not pick up the rail's button styling. */
 .pf-tabs .nav {
   display: flex; flex-direction: row; flex-wrap: nowrap; gap: 4px;
@@ -142,15 +142,9 @@
 .page-header { margin: 14px 2px 18px; }
 .page-title { font-size: 1.45rem; font-weight: 700; margin: 0 0 2px; }
 .page-sub { color: var(--text-muted); font-size: 0.8rem; }
-/* a page-level switch under the title (e.g. Attribution: All / Content / Users) */
+/* a page-level switch under the title (e.g. Top Spenders: All / Content / Users) */
 .page-switch { display: flex; align-items: center; gap: 10px; margin: -6px 2px 16px; flex-wrap: wrap; }
 .page-switch-note { color: var(--text-muted); font-size: 0.74rem; margin-left: 8px; }
-/* the question rows keep their wording but sit as quiet section labels */
-.row-question {
-  font-family: var(--font-mono); font-size: 0.72rem; font-weight: 500;
-  letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-secondary);
-  margin: 22px 2px 10px;
-}
 .shell-body .card { margin-bottom: 1rem; }
 
 /* ---- filter drawer -------------------------------------------------------- */
@@ -267,7 +261,3 @@ body.drawer-open .filter-drawer {
 }
 .pf-note { color: var(--text-secondary); font-size: 0.82rem; margin-bottom: 6px; }
 
-/* the question label and its Origin / Tool toggle share one line */
-.origin-tool-head { align-items: center; gap: 12px; margin-bottom: 0; }
-.origin-tool-head .row-question { margin-right: 0; }
-.origin-tool-head .seg { margin-top: 12px; }

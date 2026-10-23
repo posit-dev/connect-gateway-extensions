@@ -63,7 +63,7 @@ import duckdb
 import pandas as pd
 
 EXPORT_PATH = "__api__/v1/system/gateway/usage/export"
-LOOKBACK_DAYS = 30
+LOOKBACK_DAYS = 90
 
 # How long the export GET may wait on the socket: for the server to finish
 # converting (17-30 s for 1.6M rows) before the first byte, and between chunks.

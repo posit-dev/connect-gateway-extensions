@@ -246,13 +246,13 @@ def loaded(fake_connect: str) -> ModuleType:
 
 @pytest.fixture
 def f(loaded) -> dict:
-    """The filter dict for the whole loaded window with nothing narrowed."""
+    """The filter dict for the app's default window with nothing narrowed."""
     import app
 
     c = app.catalog()
+    start, end = app.preset_range(app.DEFAULT_PRESET, c["start"], c["end"])
     return {
-        "start": c["start"], "end": c["end"], "measure": "spend", "source": "both",
-        "dim": "username", "all_providers": c["providers"], "all_models": c["models"],
+        "start": start, "end": end, "all_providers": c["providers"], "all_models": c["models"],
         "all_users": c["users"], "all_contents": c["contents"], "providers": [],
         "models": [], "users": [], "contents": [], "sessions": [], "meta": [],
         "mode": "dark",

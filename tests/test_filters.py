@@ -13,7 +13,7 @@ from filters import sql_str, where
 def f() -> dict:
     return {
         "start": date(2026, 9, 1), "end": date(2026, 9, 30),
-        "source": "both", "users": [], "all_users": ["O'Brien", "Jane"],
+        "users": [], "all_users": ["O'Brien", "Jane"],
         "contents": [], "all_contents": ["content-1"],
         "sessions": [], "providers": [], "all_providers": ["anthropic"],
         "models": [], "all_models": ["model-1"], "meta": [],
@@ -32,14 +32,13 @@ def test_no_selection_and_all_selected_mean_no_narrowing(f):
 
 def test_quoted_values_and_metadata_groups(f):
     f.update(
-        users=["O'Brien"], source="Connect", sessions=["a'b"],
+        users=["O'Brien"], sessions=["a'b"],
         meta=[json.dumps(["team", "O'Brien"]), json.dumps(["team", "Jane"]),
               json.dumps(["env", "prod"]), "not json"],
     )
     predicate = where(f)
     assert "username IN ('O''Brien')" in predicate
     assert "workbench_session_id IN ('a''b')" in predicate
-    assert "source = 'Connect'" in predicate
     assert "IN ('O''Brien','Jane')" in predicate
     rows = [
         ("O'Brien", "a'b", '{"team":"O\u0027Brien","env":"prod"}'),
@@ -49,8 +48,7 @@ def test_quoted_values_and_metadata_groups(f):
     values = ",".join(f"({sql_str(u)}, {sql_str(s)}, {sql_str(m)})" for u, s, m in rows)
     with duckdb.connect() as con:
         found = con.sql(f"""SELECT count(*) FROM (
-            SELECT DATE '2026-09-10' AS ts, 'Connect' AS source,
-                   username, workbench_session_id, request_metadata,
+            SELECT DATE '2026-09-10' AS ts, username, workbench_session_id, request_metadata,
                    NULL AS content_guid, NULL AS provider, NULL AS model
             FROM (VALUES {values}) AS t(username, workbench_session_id, request_metadata)
         ) WHERE {predicate}""").fetchone()

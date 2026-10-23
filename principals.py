@@ -1,4 +1,4 @@
-"""Principals: pick one user, content item, Workbench session or Connect group,
+"""Profiles: pick one user, content item, Workbench session or Connect group,
 and drill into it.
 
 A prototype, built to find out which of these views are worth keeping. Every
@@ -31,14 +31,13 @@ from conversations import HIGH_PCT, MIN_BASELINE, higher_cost
 from filters import dim_sql
 from pages.context import PageContext
 from theme import apply, card_num, card_usd, empty_fig, fmt_usd, render_widget
-from ui_shell import empty_note, page_header, table_header
+from ui_shell import empty_note, export_button, page_header, table_header
 
 KINDS = {"user": "User", "content": "Content", "session": "Session", "group": "Group"}
 NOUN = {"user": "user", "content": "content item", "session": "session", "group": "group"}
 # The column that identifies a principal of each kind, on gateway_events. A group
 # is not a column: it is reached through user_groups (see kind_source).
 KEY_COL = {"user": "username", "content": "content_guid", "session": "workbench_session_id"}
-RECORDS_MAX = 2000  # rows in the grid; the CSV export is never capped
 DASH, UP, DOWN = "\u2014", "\u25b2", "\u25bc"
 
 
@@ -216,9 +215,6 @@ def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
                    COUNT(*) requests, SUM({cost}) est_spend_usd
             FROM gateway_events WHERE {w} AND {mine} AND workbench_session_id IS NOT NULL
             GROUP BY 2 ORDER BY est_spend_usd DESC""")
-        others["session"] = [
-            f"\u25b6 {s}" if i == key else s for s, i in zip(others.session, others.id)
-        ]
         projects = usage.q(f"""
             SELECT COALESCE(workbench_project_name, '(no project)') AS project,
                    COUNT(DISTINCT workbench_session_id) sessions,
@@ -227,7 +223,7 @@ def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
             GROUP BY 1 ORDER BY est_spend_usd DESC""")
         return [
             dict(title=f"All sessions by {owner}", df=others, label="session",
-                 note="\u25b6 marks this one."),
+                 note=""),
             dict(title=f"{owner}'s Workbench projects", df=projects, label="project", note="",
                  empty="No Workbench project named in this view."),
         ]
@@ -409,12 +405,11 @@ def fig_relation(rel: dict, mode: str) -> go.Figure:
 
 # ---- UI ---------------------------------------------------------------------------
 def panel():
-    """The Principals tab, a prototype drill-down."""
+    """The Profiles tab, a prototype drill-down."""
     return ui.nav_panel(
-        "Principals",
-        page_header("Principals", "One user, content item, session or group, drilled into."),
+        "Profiles",
+        page_header("Profiles", "Drill down into details for users, groups, content and sessions."),
         ui.div(
-            ui.span("Kind", class_="strip-label"),
             ui.div(
                 ui.input_radio_buttons("pf_kind", None, KINDS, selected="user", inline=True),
                 class_="seg",
@@ -429,7 +424,6 @@ def panel():
                 ),
                 class_="pf-pick",
             ),
-            ui.span("ranked by estimated spend in view", class_="page-switch-note"),
             class_="page-switch",
         ),
         ui.output_ui("pf_header"),
@@ -438,18 +432,47 @@ def panel():
         # (no sessions, say) the tabs were rows of empty cards under the note.
         ui.panel_conditional("input.pf_pick", ui.div(ui.navset_underline(
             ui.nav_panel(
+                "Conversations",
+                ui.card(
+                    ui.card_header(
+                        ui.div(
+                            ui.span(ui.output_text("pf_conv_chart_title", inline=True)),
+                            ui.div(
+                                ui.div(
+                                    ui.input_radio_buttons(
+                                        "pf_conv_by", None, conv_tools.CONV_BY,
+                                        selected="context", inline=True,
+                                    ),
+                                    class_="seg",
+                                ),
+                                export_button("dl_pf_conv_groups"),
+                                class_="hdr-flex-left",
+                            ),
+                            class_="hdr-flex",
+                        )
+                    ),
+                    output_widget("pf_conv_spend"),
+                    ui.output_ui("pf_conv_groups_note"),
+                ),
+            ),
+            ui.nav_panel(
                 "Spending",
                 ui.card(
                     ui.card_header(
                         ui.div(
                             ui.span("Over time"),
                             ui.div(
-                                ui.input_radio_buttons(
-                                    "pf_grain", None,
-                                    {"day": "Daily", "week": "Weekly", "month": "Monthly"},
-                                    selected="day", inline=True,
+                                ui.div(
+                                    ui.input_radio_buttons(
+                                        "pf_grain", None,
+                                        {"day": "Daily", "week": "Weekly", "month": "Monthly"},
+                                        selected="day", inline=True,
+                                    ),
+                                    class_="seg",
                                 ),
-                                class_="seg",
+                                # Every gateway record of the pick, uncapped.
+                                export_button("dl_pf_records", "Export records"),
+                                class_="hdr-flex-left",
                             ),
                             class_="hdr-flex",
                         )
@@ -462,28 +485,15 @@ def panel():
                     ui.card(ui.card_header("By origin"), output_widget("pf_origins")),
                     col_widths=[4, 4, 4],
                 ),
-                ui.card(
-                    table_header(ui.output_text("pf_records_title", inline=True),
-                                 "dl_pf_records"),
-                    ui.card_body(ui.output_data_frame("pf_records")),
-                ),
             ),
             ui.nav_panel(
                 "Connections",
-                ui.p(
-                    "What this principal's spend is tied to. A user: the content "
-                    "they used and their Workbench sessions. Content: the users it "
-                    "was charged to and their groups. A session: its owner's other "
-                    "sessions and projects. A group: its members and the other "
-                    "groups they share.",
-                    class_="pf-note pf-tab-note",
-                ),
-                # Charts in one row and tables in the next, so a short chart never
-                # leaves its neighbour's table floating at the bottom of a tall card.
+                # The chart shows the top rows; the CSV holds all of them.
                 ui.layout_columns(
                     *[
                         ui.card(
-                            ui.card_header(ui.output_text(f"pf_rel_{i}_title", inline=True)),
+                            table_header(ui.output_text(f"pf_rel_{i}_title", inline=True),
+                                         f"dl_pf_rel_{i}"),
                             ui.card_body(
                                 ui.output_ui(f"pf_rel_{i}_note"),
                                 output_widget(f"pf_rel_{i}_chart"),
@@ -492,44 +502,6 @@ def panel():
                         for i in (0, 1)
                     ],
                     col_widths=[6, 6],
-                ),
-                ui.layout_columns(
-                    *[
-                        ui.card(
-                            table_header(ui.output_text(f"pf_rel_{i}_ttitle", inline=True),
-                                         f"dl_pf_rel_{i}"),
-                            ui.card_body(ui.output_data_frame(f"pf_rel_{i}")),
-                        )
-                        for i in (0, 1)
-                    ],
-                    col_widths=[6, 6],
-                ),
-            ),
-            ui.nav_panel(
-                "Conversations",
-                ui.card(
-                    ui.card_header(
-                        ui.div(
-                            ui.span(ui.output_text("pf_conv_chart_title", inline=True)),
-                            ui.div(
-                                ui.input_radio_buttons(
-                                    "pf_conv_by", None, conv_tools.CONV_BY, selected="context",
-                                    inline=True,
-                                ),
-                                class_="seg",
-                            ),
-                            class_="hdr-flex",
-                        )
-                    ),
-                    output_widget("pf_conv_spend"),
-                ),
-                ui.card(
-                    table_header(ui.output_text("pf_conv_groups_title", inline=True),
-                                 "dl_pf_conv_groups"),
-                    ui.card_body(
-                        ui.output_ui("pf_conv_groups_note"),
-                        ui.output_data_frame("pf_conv_groups"),
-                    ),
                 ),
             ),
         ), class_="pf-tabs")),
@@ -543,7 +515,6 @@ def server(input, ctx: PageContext, records_sql):
     Returns open_profile(kind, key), to jump here from elsewhere.
     """
     flt, where, est_cost = ctx.flt, ctx.where, ctx.est_cost
-    formatted, fitted_grid = ctx.formatted, ctx.fitted_grid
     register_export, register_sql_export = ctx.register_export, ctx.register_sql_export
     pending: reactive.Value = reactive.value(None)
 
@@ -566,7 +537,7 @@ def server(input, ctx: PageContext, records_sql):
         ui.update_radio_buttons("pf_kind", selected=kind)
         if input.pf_kind() == kind:
             ui.update_selectize("pf_pick", selected=key)
-        ui.update_navset("main_tabs", selected="Principals")
+        ui.update_navset("main_tabs", selected="Profiles")
 
     @reactive.calc
     def ent() -> SimpleNamespace:
@@ -754,19 +725,9 @@ def server(input, ctx: PageContext, records_sql):
         def _chart():
             return fig_relation(rels()[i], flt()["mode"])
 
-        def _table():
-            df = rels()[i]["df"].copy()
-            df["est_spend_usd"] = df.est_spend_usd.round(2)
-            return fitted_grid(formatted(df), scroll_after=8)
-
-        def _ttitle():
-            return f"{rels()[i]['title']}: all rows"
-
         render.text(named(_title, f"pf_rel_{i}_title"))
-        render.text(named(_ttitle, f"pf_rel_{i}_ttitle"))
         render.ui(named(_note, f"pf_rel_{i}_note"))
         render_widget(named(_chart, f"pf_rel_{i}_chart"))
-        render.data_frame(named(_table, f"pf_rel_{i}"))
         register_export(f"pf_rel_{i}", lambda: rels()[i]["df"],
                         ("pf_connections_%d.csv" % (i + 1)))
 
@@ -810,7 +771,7 @@ def server(input, ctx: PageContext, records_sql):
         kind, and the totals per group. Cut at percentiles of its own
         conversations, so the bands fit this principal and not the server."""
         df = convs().copy()
-        # the frame the Conversations page's grouping works on
+        # the frame conv_keys groups
         df = df.assign(main_model=df.main_model.fillna(df.model), calls=df.turns,
                        duration_min=df.minutes.clip(lower=0.5),
                        cache_hit=df.cache_pct / 100, peak_input=df.peak_context)
@@ -827,10 +788,6 @@ def server(input, ctx: PageContext, records_sql):
         g = conv_grouped()
         return conv_tools.conv_spend_fig(g.groups, conv_by(), flt()["mode"], HIGH_PCT)
 
-    @render.text
-    def pf_conv_groups_title():
-        return f"Conversation spend by {conv_tools.CONV_BY[conv_by()].lower()}"
-
     @render.ui
     def pf_conv_groups_note():
         n = len(conv_grouped().df)
@@ -844,36 +801,15 @@ def server(input, ctx: PageContext, records_sql):
             + (f" Across everyone, p{HIGH_PCT} is {fmt_usd(org_line())}."
                if org_line() is not None else ""), class_="card-note")
 
-    @render.data_frame
-    def pf_conv_groups():
-        t = conv_tools.conv_group_table(conv_grouped().groups)
-        return fitted_grid(formatted(t))
-
     register_export("pf_conv_groups",
                     lambda: conv_tools.conv_group_table(conv_grouped().groups),
-                    "principal_conversation_groups.csv")
-
-    @render.text
-    def pf_records_title():
-        e = ent()
-        n = int(usage.scalar(
-            f"SELECT COUNT(*) FROM gateway_events WHERE {e.w} AND {e.p}") or 0)
-        if n > RECORDS_MAX:
-            return (f"Gateway records for {e.label}: latest {RECORDS_MAX:,} of {n:,} shown")
-        return f"Gateway records for {e.label} ({n:,})"
-
-    @render.data_frame
-    def pf_records():
-        e = ent()
-        return render.DataGrid(
-            usage.q(records_sql(f"{e.w} AND {e.p}", f" LIMIT {RECORDS_MAX}")), height="420px"
-        )
+                    "profile_conversation_groups.csv")
 
     # Every record of the picked principal, uncapped: DuckDB writes the file.
     register_sql_export(
         "pf_records",
         lambda: records_sql(f"{ent().w} AND {ent().p}"),
-        "principal_records.csv",
+        "profile_records.csv",
     )
 
     return open_profile

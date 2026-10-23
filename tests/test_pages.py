@@ -15,12 +15,10 @@ import pandas as pd
 import pytest
 from shiny import reactive, ui
 
-import conversations
 import filters
 import pricing
 import principals
-from pages import adoption, attribution, models, raw_data
-from pages import conversations as conversations_page
+from pages import adoption, attribution, overview, raw_data
 from pages.context import PageContext
 
 
@@ -34,7 +32,7 @@ def make_ctx(f):
     """A PageContext over `f`. Exports land in the returned dicts."""
     import app
 
-    def make(priced_only: str = "", sql_exports: dict | None = None):
+    def make(sql_exports: dict | None = None):
         exports: dict = {}
         ctx = PageContext(
             flt=lambda: f, where=filters.where, cat=app.catalog,
@@ -45,9 +43,7 @@ def make_ctx(f):
                 else lambda name, fn, filename: sql_exports.update({name: (fn, filename)})
             ),
             est_cost_uncached=pricing.est_cost_uncached,
-            total_bars=unused, measure_of=app.measure_of, formatted=app.formatted,
-            chart_labels=app.chart_labels, fitted_grid=app.fitted_grid,
-            priced_only=lambda: priced_only,
+            formatted=app.formatted, fitted_grid=app.fitted_grid,
         )
         return ctx, exports
 
@@ -108,47 +104,14 @@ def test_spend_by_principal_export_lists_every_user_and_content_item(loaded, f, 
     assert df.est_spend_usd.tolist() == sorted(df.est_spend_usd, reverse=True)
 
 
-def test_conversations_export_and_unpriced_exclusion(loaded, f, make_ctx):
-    def conversations_export(priced_only: str):
-        ctx, exports = make_ctx(priced_only)
-        conversations_page.server(SimpleNamespace(conv_by=lambda: "model"), ctx)
-        with reactive.isolate():
-            return exports, exports["conversations"][0]()
-
-    exports, df = conversations_export("")
-    assert list(exports) == ["conversations"]
-    assert exports["conversations"][1] == "conversations.csv"
-    assert not df.empty
-    for col in ("conversation_id", "principal", "calls", "est", "main_model", "high", "line"):
-        assert col in df.columns
-    for k, *_ in conversations.LEVERS:
-        assert f"sav_{k}" in df.columns
-    assert df.est.tolist() == sorted(df.est, reverse=True)
-    # The per-part cost the page sums equals the catalog's own estimate.
-    total = loaded.scalar(f"""SELECT SUM({pricing.est_cost()}) FROM gateway_events
-        WHERE {filters.where(f)} AND conversation_id IS NOT NULL""")
-    assert df.est.sum() == pytest.approx(total, abs=1e-6)
-    assert df.calls.sum() == loaded.scalar(
-        f"""SELECT COUNT(*) FROM gateway_events
-            WHERE {filters.where(f)} AND conversation_id IS NOT NULL""")
-
-    # The shared unpriced-model fragment from app.py narrows the page's query.
-    top = df.main_model.dropna().iloc[0]
-    _, narrowed = conversations_export(
-        f" AND (model IS NULL OR model NOT IN ({filters.sql_str(top)}))"
-    )
-    assert top not in set(narrowed.main_model.dropna())
-    assert narrowed.calls.sum() < df.calls.sum()
-
-
 def test_principals_panel_outputs():
     html = str(ui.TagList(ui.navset_tab(principals.panel(), id="main_tabs")))
-    assert 'data-value="Principals"' in html
+    assert 'data-value="Profiles"' in html
     for output_id in (
         "pf_kind", "pf_pick", "pf_header", "pf_kpis", "pf_grain", "pf_trend",
-        "pf_models", "pf_providers", "pf_origins", "pf_records_title", "pf_records",
-        "dl_pf_records", "pf_rel_0_chart", "pf_rel_1", "dl_pf_rel_1",
-        "pf_conv_by", "pf_conv_spend", "pf_conv_groups", "dl_pf_conv_groups",
+        "pf_models", "pf_providers", "pf_origins",
+        "dl_pf_records", "pf_rel_0_chart", "dl_pf_rel_1",
+        "pf_conv_by", "pf_conv_spend", "pf_conv_groups_note", "dl_pf_conv_groups",
     ):
         assert f'id="{output_id}"' in html
 
@@ -167,9 +130,9 @@ def test_principals_exports_use_raw_data_sql(loaded, f, make_ctx):
     assert callable(open_profile)
     assert {name: filename for name, (_, filename) in exports.items()} == {
         "pf_rel_0": "pf_connections_1.csv", "pf_rel_1": "pf_connections_2.csv",
-        "pf_conv_groups": "principal_conversation_groups.csv",
+        "pf_conv_groups": "profile_conversation_groups.csv",
     }
-    assert sql_exports["pf_records"][1] == "principal_records.csv"
+    assert sql_exports["pf_records"][1] == "profile_records.csv"
 
     with reactive.isolate():
         # The uncapped export is the Raw Data builder over this principal's rows.
@@ -190,12 +153,13 @@ def run_export(make_ctx, page, name: str, **inputs):
     ctx, exports = make_ctx()
     page.server(SimpleNamespace(**{k: (lambda v=v: v) for k, v in inputs.items()}), ctx)
     with reactive.isolate():
-        return exports[name][0](), exports[name][1]
+        filename = exports[name][1]
+        return exports[name][0](), filename() if callable(filename) else filename
 
 
 def test_adoption_export_counts_active_users(loaded, f, make_ctx):
-    df, filename = run_export(make_ctx, adoption, "adoption", adopt_grain="day",
-                              tool_grain="week", heat_measure="requests")
+    df, filename = run_export(make_ctx, adoption, "adoption", adoption_kind="user",
+                              tool_grain="week")
     assert filename == "adoption_active_users.csv"
     # Spelled out: the export is read by people who do not know the acronyms.
     assert df.columns.tolist() == [
@@ -224,45 +188,25 @@ def test_adoption_narrowed_to_one_user(loaded, f, make_ctx):
     user = loaded.q(f"""SELECT username FROM gateway_events WHERE {filters.where(f)}
                         AND username IS NOT NULL GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1""")
     f["users"] = [user.username[0]]
-    df, _ = run_export(make_ctx, adoption, "adoption", adopt_grain="day",
-                       tool_grain="week", heat_measure="requests")
+    df, _ = run_export(make_ctx, adoption, "adoption", adoption_kind="user",
+                       tool_grain="week")
     assert df.monthly_active_users.max() == 1
     assert df.daily_active_users.max() == 1
 
 
-def test_models_export_totals_and_unpriced_model(loaded, f, make_ctx):
-    df, filename = run_export(make_ctx, models, "models")
-    assert filename == "models.csv"
+def test_adoption_counts_content_items_when_toggled(loaded, f, make_ctx):
+    """The Content toggle counts distinct content items, not the people behind them."""
+    df, filename = run_export(make_ctx, adoption, "adoption", adoption_kind="content",
+                              tool_grain="week")
+    assert filename == "adoption_active_content_items.csv"
     assert df.columns.tolist() == [
-        "model", "providers", "est_spend_usd", "pct_of_total", "requests", "input_tokens",
-        "output_tokens", "cache_read_tokens", "cache_pct", "cache_savings_usd", "error_pct",
-        "p95_ms",
-    ]
-    assert df.model.is_unique
-    assert df.est_spend_usd.tolist() == sorted(df.est_spend_usd, reverse=True)
-    assert df.pct_of_total.sum() == pytest.approx(100)
-    assert df.cache_pct.dropna().between(0, 100).all()
-    assert df.error_pct.between(0, 100).all()
-    assert (df.cache_savings_usd >= -1e-9).all()  # caching never costs more than not caching
-
-    base = f"{filters.where(f)} AND model IS NOT NULL AND model <> ''"
-    assert df.requests.sum() == loaded.scalar(f"SELECT COUNT(*) FROM gateway_events WHERE {base}")
-    assert df.input_tokens.sum() == loaded.scalar(
-        f"SELECT SUM(input_tokens) FROM gateway_events WHERE {base}")
-    assert df.est_spend_usd.sum() == pytest.approx(loaded.scalar(
-        f"SELECT SUM({pricing.est_cost()}) FROM gateway_events WHERE {base}"))
-    # A model with no catalog price still counts its requests, at $0.
-    free = df[df.est_spend_usd == 0]
-    assert not free.empty and (free.requests > 0).all()
-
-
-def test_models_narrowed_to_one_model(loaded, f, make_ctx):
-    full, _ = run_export(make_ctx, models, "models")
-    f["models"] = [full.model.iloc[0]]
-    narrowed, _ = run_export(make_ctx, models, "models")
-    assert narrowed.model.tolist() == [full.model.iloc[0]]
-    assert narrowed.requests.iloc[0] == full.requests.iloc[0]
-    assert narrowed.pct_of_total.iloc[0] == pytest.approx(100)
+        "day", "daily_active_content_items", "weekly_active_content_items",
+        "monthly_active_content_items"]
+    day = f["end"]
+    on_day = loaded.scalar(f"""SELECT COUNT(DISTINCT content_guid) FROM gateway_events
+        WHERE content_guid IS NOT NULL AND CAST(ts AS DATE) = DATE '{day}'""")
+    assert df.iloc[-1].daily_active_content_items == on_day
+    assert (df.daily_active_content_items <= df.monthly_active_content_items).all()
 
 
 def test_raw_data_records_follow_the_filter(loaded, f, make_ctx):

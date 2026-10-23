@@ -57,16 +57,20 @@ def test_every_page_renders_without_errors_or_nan(sparse_app_server):
     no_broken_text(reply)
 
 
+async def by_origin(session: Session, first: Reply, html: str) -> tuple[Reply, dict[str, float]]:
+    """The first view, and the Overview's spend by origin."""
+    reply = await session.update(group_by="source")
+    return first, {t["name"]: sum(t["y"]) for t in figure_traces(reply, "spend_time")}
+
+
 def test_origin_totals_add_up_to_the_spend_on_the_page(sparse_app_server):
     """Requests with no origin are a bucket of their own, not left out."""
-    reply = visit(sparse_app_server, first_view)
+    reply, spend = visit(sparse_app_server, by_origin)
     total = dollars(tiles(reply, "kpis")["Estimated spend"][0])
-    bars = figure_traces(reply, "origin_total")[0]
-    labels = dict(line.split("\n")[:2] for line in bars["customdata"])
-    assert set(labels) == {"(unidentified)", "connect"}
-    # Each bar is rounded for display, so the sum is within a few dollars.
-    assert sum(dollars(v) for v in labels.values()) == pytest.approx(total, abs=2)
-    assert dollars(labels["(unidentified)"]) > dollars(labels["connect"])
+    assert set(spend) == {"(unidentified)", "connect"}
+    # The tile is rounded to the dollar, so the sum is within a dollar of it.
+    assert sum(spend.values()) == pytest.approx(total, abs=1)
+    assert spend["(unidentified)"] > spend["connect"]
 
 
 def test_sessions_say_not_reported_rather_than_zero(sparse_app_server):
@@ -79,26 +83,31 @@ def test_sessions_say_not_reported_rather_than_zero(sparse_app_server):
 
 def test_content_average_is_content_spend_over_content_items(sparse_app_server):
     """It divided all of the spend by the content count: $3,769 per item for two items."""
-    reply = visit(sparse_app_server, first_view)
+    reply, labels = visit(sparse_app_server, by_origin)
     total = dollars(tiles(reply, "kpis")["Estimated spend"][0])
     items = int(tiles(reply, "kpis")["Content"][0].replace(",", ""))
     avg = dollars(tiles(reply, "kpis")["Content"][1].split(" avg")[0])
-    connect = dict(line.split("\n")[:2] for line in
-                   figure_traces(reply, "origin_total")[0]["customdata"])["connect"]
+    connect = labels["connect"]
     assert avg < total / items
-    assert avg == pytest.approx(dollars(connect) / items, abs=0.01)
+    assert avg == pytest.approx(connect / items, abs=0.01)
 
 
 def test_harness_charts_keep_requests_with_no_user_agent(sparse_app_server):
     reply = visit(sparse_app_server, first_view)
-    for out in ("tool_time", "cache_savings_time"):
-        names = {t.get("name") for t in figure_traces(reply, out)}
-        assert names == {"(no user agent)"}, out
+    names = {t.get("name") for t in figure_traces(reply, "tool_time")}
+    assert names == {"(no user agent)"}
+
+    async def by_harness(session: Session, first: Reply, html: str):
+        return await session.update(group_by="tool")
+
+    reply = visit(sparse_app_server, by_harness)
+    names = {t.get("name") for t in figure_traces(reply, "cache_savings_time")}
+    assert names == {"(no user agent)"}
 
 
 def test_principals_explain_a_kind_with_nobody_in_it(sparse_app_server):
     async def scenario(session: Session, first: Reply, html: str):
-        return await session.update(main_tabs="Principals", pf_kind="session")
+        return await session.update(main_tabs="Profiles", pf_kind="session")
 
     reply = visit(sparse_app_server, scenario)
     assert reply.errors == {}
