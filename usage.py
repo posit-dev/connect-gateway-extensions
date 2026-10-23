@@ -701,9 +701,8 @@ def _shape_into(
 
 def _count(table: str, con: duckdb.DuckDBPyConnection | None = None) -> int:
     """Rows in a table. The caller holds _lock."""
-    row = (con or _con).sql(f"SELECT COUNT(*) FROM {table}").fetchone()
-    assert row is not None  # COUNT(*) always returns one row
-    return row[0]
+    rows = (con or _con).sql(f"SELECT COUNT(*) FROM {table}").fetchall()
+    return rows[0][0]  # COUNT(*) always returns one row
 
 
 def _read_export(

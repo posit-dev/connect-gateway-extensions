@@ -32,7 +32,7 @@ def events(con) -> pd.DataFrame:
 def has_events(con) -> bool:
     return bool(con.sql(
         "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'gateway_events'"
-    ).fetchone()[0])  # pyright: ignore[reportOptionalSubscript]
+    ).fetchall()[0][0])
 
 
 @pytest.fixture
@@ -145,8 +145,8 @@ def test_app_load_leaves_a_snapshot_a_restart_can_use(loaded, target):
         time.sleep(0.1)
     assert state is not None
     assert state["as_of"].strftime(usage._RFC3339) == loaded.INFO["as_of"]
-    assert target.sql("SELECT COUNT(*) FROM gateway_events").fetchone() == (
-        loaded.INFO["rows"],)
+    assert target.sql("SELECT COUNT(*) FROM gateway_events").fetchall() == [(
+        loaded.INFO["rows"],)]
 
 
 def test_write_to_an_unusable_directory_is_swallowed(source, tmp_path):

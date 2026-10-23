@@ -49,8 +49,8 @@ def test_quoted_values_and_metadata_groups(f):
             SELECT DATE '2026-09-10' AS ts, username, workbench_session_id, request_metadata,
                    NULL AS content_guid, NULL AS provider, NULL AS model
             FROM (VALUES {values}) AS t(username, workbench_session_id, request_metadata)
-        ) WHERE {predicate}""").fetchone()
-    assert found == (1,)
+        ) WHERE {predicate}""").fetchall()
+    assert found == [(1,)]
 
 
 def test_groups_narrow_to_their_members(f):

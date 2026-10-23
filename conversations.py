@@ -44,7 +44,7 @@ def higher_cost(
 # What the conversation spend chart can group by.
 CONV_BY = {
     "context": "Peak context", "model": "Model", "duration": "Duration", "turns": "Turns",
-    "pace": "Pace", "cache": "Caching", "tool": "Harness",
+    "pace": "Pace", "cache": "Cache misses", "tool": "Harness",
 }
 # The model view names this many models and folds the rest into "other".
 CONV_BY_MODELS = 7
@@ -145,7 +145,7 @@ def conv_keys(df: pd.DataFrame, by: str) -> tuple[pd.Series, list[str]]:
     """Each conversation's group for the chosen kind, and the groups in order.
 
     `df` has one row per conversation: est, main_model, duration_min, calls,
-    cache_hit, peak_input, med_idle. Every grouping comes from the data in view: models are
+    cache_miss, peak_input, med_idle. Every grouping comes from the data in view: models are
     ranked by spend with the tail folded into "other", and the numeric views
     are cut at percentiles of the conversations themselves (see quantile_bands).
     """
@@ -182,7 +182,7 @@ def conv_keys(df: pd.DataFrame, by: str) -> tuple[pd.Series, list[str]]:
         vals, kind = {
             "duration": (df.duration_min * 60, "secs"),
             "turns": (df.calls, "int"),
-            "cache": (df.cache_hit.fillna(0), "share"),
+            "cache": (df.cache_miss.fillna(0), "tokens"),
             "context": (df.peak_input.fillna(0), "tokens"),
         }[by]
         key, order = quantile_bands(vals, kind)
@@ -282,8 +282,9 @@ CURVE_X = {
     # A pause of 0 s has no place on a log axis; a tenth of a second reads the same.
     "pace": (lambda d: d.med_idle.clip(lower=0.1), "log",
              "typical pause between requests (seconds, median)", ",.1f"),
-    "cache": (lambda d: d.cache_hit * 100, "linear",
-              "input read from the prompt cache (%)", ".0f"),
+    "cache": (lambda d: d.cache_miss, "log",
+              "input not read from the prompt cache (tokens, summed over the conversation)",
+              ",.0f"),
 }
 
 
