@@ -21,27 +21,31 @@
   --flag-soft: #fbedec;
 
   --radius: 6px;
-  --font-ui: "Open Sans", "Source Sans Pro", system-ui, -apple-system,
-    "Segoe UI", Roboto, sans-serif;
+  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --shell-bg: #ffffff;
+  --card-accent: transparent;
 }
 
 [data-bs-theme="dark"] {
-  --surface-1: #1c2128;
-  --surface-2: #22282f;
-  --page: #14181d;
-  --text-primary: #eef1f4;
-  --text-secondary: #b3bcc6;
-  --text-muted: #8a949f;
-  --hairline: #2e353d;
-  --hairline-strong: #3d454e;
-  --accent: #5aa7e0;
-  --accent-soft: #1e2a35;
-  --accent-border: #33556f;
+  --surface-1: #131a2b;
+  --surface-2: #1a2238;
+  --page: #0a0e1a;
+  --shell-bg: #0d1322;
+  --text-primary: #e8ecf4;
+  --text-secondary: #9aa6bd;
+  --text-muted: #6b7896;
+  --hairline: #1f2a44;
+  --hairline-strong: #2a3656;
+  --accent: #4d8dff;
+  --accent-soft: #14233f;
+  --accent-border: #2a4a85;
+  --card-accent: #2f6bf0;
   --track: #22415a;
-  --good-text: #83b96a;
-  --good-soft: #1f2a1e;
-  --flag-text: #e08a85;
-  --flag-soft: #2c1d1d;
+  --good-text: #34d399;
+  --good-soft: #10281f;
+  --flag-text: #f87171;
+  --flag-soft: #2c1517;
 }
 
 body {
@@ -217,12 +221,16 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
 .stat-tile {
   background: var(--surface-1);
   border: 1px solid var(--hairline);
+  border-top: 2px solid var(--card-accent);
   border-radius: var(--radius);
   padding: 14px 18px;
 }
 .tile-label {
-  color: var(--text-secondary);
-  font-size: 0.84rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   font-weight: 400;
   display: flex; align-items: center; gap: 6px;
 }
@@ -236,20 +244,60 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
   /* proportional figures on big standalone numbers; tabular only in tables */
   font-variant-numeric: normal;
 }
-.tile-note { color: var(--text-muted); font-size: 0.78rem; min-height: 1em; }
-
-/* ---- verdict chips ------------------------------------------------------- */
-.verdict {
-  display: inline-block;
-  border-radius: 999px;
-  padding: 3px 12px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  margin-bottom: 8px;
+/* A name rather than a figure (see theme.stat_tile): one line, smaller, cut
+   with an ellipsis; the full name is in the title attribute. The line height
+   keeps the tile as tall as its numeric neighbours. */
+.tile-value-text {
+  font-size: 1.45rem;
+  line-height: calc(1.85rem * 1.3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.verdict-ok { background: var(--good-soft); color: var(--good-text); }
-.verdict-flag { background: var(--flag-soft); color: var(--flag-text); }
-.verdict-neutral { background: var(--surface-2); color: var(--text-secondary); }
+.tile-note { color: var(--text-muted); font-size: 0.78rem; min-height: 1em; }
+/* Where a principal stands against its peers (principals.versus_peers): a
+   tinted badge loud enough to read next to the figure, then an outlier tag
+   when it is in the top 5%. */
+.versus-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
+  margin: 4px 0 6px;
+}
+.versus {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.versus-below {
+  color: var(--good-text);
+  background: color-mix(in srgb, var(--good-text) 16%, transparent);
+  border-color: color-mix(in srgb, var(--good-text) 50%, transparent);
+}
+.versus-above {
+  color: #9a6b00;
+  background: color-mix(in srgb, #e0a72c 20%, transparent);
+  border-color: color-mix(in srgb, #e0a72c 60%, transparent);
+}
+[data-bs-theme="dark"] .versus-above { color: #f2bd4a; }
+.versus-even {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
+  border-color: color-mix(in srgb, var(--text-muted) 45%, transparent);
+}
+.versus-outlier {
+  color: #c0413b;
+  background: color-mix(in srgb, #c0413b 16%, transparent);
+  border-color: color-mix(in srgb, #c0413b 55%, transparent);
+}
+[data-bs-theme="dark"] .versus-outlier { color: #f07a74; }
+/* Tiles in one row share a height, so a tile with a short note does not sit
+   shorter than its neighbours. */
+.kpi-row > * { display: flex; }
+.kpi-row .stat-tile { flex: 1 1 auto; }
 
 /* ---- misc ---------------------------------------------------------------- */
 .inline-controls {
@@ -270,12 +318,15 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
   color: var(--accent); text-decoration: none; cursor: pointer;
 }
 .filter-with-clear .clear-link:hover { color: var(--accent); text-decoration: underline; }
-/* An empty checkbox group reads as "nothing shown" unless the empty state is
-   spelled out, so Provider and Models each say what no selection means. */
-.filter-hint {
-  color: var(--text-muted); font-size: 0.74rem; line-height: 1.4;
-  margin: -6px 0 2px;
+.help-ico {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; margin-left: 6px; vertical-align: middle;
+  border: 1px solid var(--text-muted); border-radius: 50%;
+  color: var(--text-muted); font-size: 0.65rem; font-weight: 600; line-height: 1;
+  cursor: help;
 }
+.help-ico:hover, .help-ico:focus { color: var(--accent); border-color: var(--accent); outline: none; }
+.hdr-flex-left { display: flex; align-items: center; gap: 8px; }
 .hdr-flex { display: flex; justify-content: space-between; align-items: center; width: 100%; }
 .export-btn {
   font-size: 0.74rem; padding: 2px 10px;
@@ -285,58 +336,27 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
 }
 .export-btn:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 
-/* ---- filter chips above a table ------------------------------------------ */
-.chip-bar {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-/* The button is only the popover's trigger; the pill inside it carries the look,
-   which keeps the active state on an element the server re-renders. */
-.chip-btn { background: none; border: 0; padding: 0; }
-.chip {
-  align-items: center;
-  background: var(--surface-1);
-  border: 1px solid var(--hairline-strong);
-  border-radius: 999px;
-  color: var(--text-secondary);
-  display: inline-flex;
-  font-size: 0.78rem;
-  font-weight: 500;
-  gap: 6px;
-  padding: 4px 12px;
-}
-.chip::after { content: "\25be"; font-size: 0.7rem; line-height: 1; }
-.chip-btn:hover .chip,
-.chip-btn:focus-visible .chip { border-color: var(--accent); color: var(--accent); }
-.chip-on {
-  background: var(--accent-soft);
-  border-color: var(--accent-border);
-  color: var(--accent);
-  font-weight: 600;
-}
-.chip-menu { min-width: 190px; }
-.chip-menu .shiny-input-container { margin-bottom: 0; width: auto; }
-.chip-menu-note {
-  color: var(--text-muted); font-size: 0.74rem; line-height: 1.4;
-  margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--hairline);
-}
-.chip-clear { font-size: 0.78rem; color: var(--accent); }
-.chip-bar-note {
-  color: var(--text-muted); font-size: 0.76rem; line-height: 1.45;
-  margin: -4px 0 12px;
-}
-
 /* ---- data grids ---------------------------------------------------------- */
-shiny-data-frame { font-variant-numeric: tabular-nums; font-size: 0.82rem; }
+shiny-data-frame { font-variant-numeric: tabular-nums; font-size: 0.9rem; }
 /* headers sit one step off the card surface so they read as a distinct band
    from the body rows -- surface-2 is darker in light mode, lighter in dark */
 shiny-data-frame table > thead th {
   background: var(--surface-2) !important;
   border-bottom: 1px solid var(--hairline-strong) !important;
-  color: var(--text-secondary) !important;
-  font-weight: 600;
+  color: var(--text-primary) !important;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  padding: 9px 12px !important;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 500;
 }
+/* One line per cell: wrapped names ("claude-sonnet-4-" / "6") broke the rows.
+   A wide table scrolls sideways inside its card instead. */
+shiny-data-frame table th,
+shiny-data-frame table td { white-space: nowrap !important; }
 shiny-data-frame table > tbody td {
+  padding: 8px 12px !important;
   border-top: 1px solid var(--hairline) !important;
   color: var(--text-primary);
 }
@@ -355,7 +375,7 @@ body .card-body shiny-data-frame .shiny-data-grid {
 }
 
 /* ---- refresh control ----------------------------------------------------- */
-.refresh-btn { margin-top: 6px; width: 100%; }
+.refresh-btn { white-space: nowrap; }
 /* Quieter than Refresh: two identical buttons stacked would give a discarding
    action the same weight as the one that loads data. `.btn.` is needed to outrank
    the `.btn.action-button` accent treatment above. */
@@ -372,12 +392,6 @@ body .card-body shiny-data-frame .shiny-data-grid {
 
 /* ---- one question per row ------------------------------------------------ */
 .question-block { margin-bottom: 10px; }
-.row-question {
-  color: var(--text-primary);
-  font-size: 1rem;
-  font-weight: 600;
-  margin: 20px 2px 10px;
-}
 /* Filled with the accent rather than outlined: an outlined circle on the gray
    --page canvas reads as an artifact, not as something to click. */
 .help-icon {
@@ -431,3 +445,50 @@ body .card-body shiny-data-frame .shiny-data-grid {
   font-size: 0.85rem;
   padding: 8px 2px 2px;
 }
+
+/* Profiles: the box under the Conversations tab (principals.conv_summary): the
+   count on the left, then two bars splitting conversations and spend into the
+   higher-cost and normal camps, with a key under them. Styled as a stat tile. */
+.conv-summary {
+  display: flex; flex-wrap: wrap; gap: 14px 32px; align-items: center;
+  margin: 0 0 16px; padding: 16px 20px;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-top: 2px solid var(--card-accent);
+  border-radius: var(--radius);
+  color: var(--text-muted); font-size: 0.85rem;
+}
+.conv-summary-count { min-width: 150px; }
+.conv-summary-num {
+  color: var(--text-primary); font-size: 1.85rem; font-weight: 600; line-height: 1.2;
+}
+.conv-summary-label,
+.conv-split-label {
+  font-family: var(--font-mono); font-size: 0.68rem;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.conv-summary-sub { margin-top: 4px; }
+.conv-summary-splits {
+  flex: 0 1 640px; display: flex; flex-direction: column; gap: 6px;
+}
+.conv-split-row { display: flex; align-items: center; gap: 12px; }
+.conv-split-label { width: 110px; flex: none; text-align: right; }
+.conv-split-bar {
+  flex: 1; display: flex; height: 20px; border-radius: 4px; overflow: hidden;
+  background: var(--hairline);
+}
+.conv-split-seg {
+  display: flex; align-items: center; padding: 0 10px; min-width: 2px;
+  font-size: 0.75rem; font-weight: 600; white-space: nowrap; overflow: hidden;
+  font-variant-numeric: tabular-nums;
+}
+.conv-split-hi { color: #2b1d00; }
+.conv-split-lo { color: #ffffff; justify-content: flex-end; }
+.conv-split-seg + .conv-split-seg { border-left: 2px solid var(--surface-1); }
+.conv-summary-keys {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px;
+  padding-left: 122px; margin-top: 2px;
+}
+.conv-summary-key { display: inline-flex; align-items: center; gap: 2px; }
+.conv-summary-how { flex-basis: 100%; }
+

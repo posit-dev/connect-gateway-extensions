@@ -5,10 +5,18 @@ Gateway. It shows requests, tokens, and estimated spend, and it groups them by
 user, content, model, and provider.
 
 The dashboard reads the gateway usage export. This export is one Parquet file
-that covers a time window. The app reads it once into a local DuckDB table at
-start. Every chart then queries local data. Press "Refresh data" to read a newer
-window. The export holds metadata only. It never contains the text of a prompt
-or a reply.
+that covers a time window. The app reads it into a local DuckDB table, and
+every chart then queries local data. The export holds metadata only. It never
+contains the text of a prompt or a reply.
+
+Connect builds the export on request, and the time that takes grows with the
+window: 17-30 s for 1.6M records. Each refresh exports the whole start-time
+window, then merges only recently ingested records locally. The full export is
+necessary because a call can be ingested long after it started; requesting only
+recent start-time partitions would omit it. The app rebuilds its local table
+from scratch every 24 hours. A Parquet snapshot in `.gateway-cache/` lets a
+restarted process reuse its existing rows, although catching up still requires
+a full-window export from Connect.
 
 ## Configuration
 
@@ -27,15 +35,102 @@ the clock by 90 days.
   `2026-09-10T00:00:00Z`.
 - `GATEWAY_TO` — the end of the window, in the same format.
 
+`GATEWAY_CACHE_DIR` moves the snapshot, for example to a shared mount that an
+administrator set up and that outlives deploys.
+
 ## Run locally
 
+The app has one code path and two possible backends. It behaves the same with
+either one; only the server it reads from changes. There is no built-in data
+and no built-in price list, so all usage, prices and content names come from
+the backend.
+
 ```bash
-python -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/shiny run app:app --port 8000
+just setup                               # once: .venv + requirements
+just run-local                           # against the mock Connect (demo/)
+just run <connect-url> <admin-api-key>   # against a real Connect
+just run                                 # same, using CONNECT_SERVER / CONNECT_API_KEY
 ```
 
 Then open http://localhost:8000.
+
+`just run-local` starts `demo/fake_connect.py` on port 3940 and stops it when
+the app exits. The mock serves the same four routes the app reads from Connect:
+
+- the usage export, with synthetic data
+- the price catalog, as a snapshot of a real one in `demo/pricing.json`
+- the price overrides, which are empty
+- the content list
+
+`FAKE_PROFILE=sparse just run-local` makes the mock look like a server whose
+callers send no User-Agent and no Gateway-Metadata, with almost all traffic
+outside content: no harness, no Workbench session, and an origin only on content
+rows. Real servers can look like this, and it is the case the origin, harness and
+session views have to handle without going blank (`tests/test_sparse.py`).
+
+Like Connect, the mock wants an API key on every request. Models the catalog
+does not price cost $0 against either backend; the mock's `gpt-5` traffic is
+one such model.
+
+## Develop
+
+```bash
+just setup-dev    # once: .venv + requirements + dev-requirements.txt
+just test         # every test (pytest); some start their own mock Connect
+just test-fast    # only the tests that need no server, in about a second
+just typecheck    # pyright, configured in pyrightconfig.json
+```
+
+The tests give real inputs to real code rather than mocking it: usage exports
+that Connect's own export code built (`tests/fixtures/`), small Parquet exports
+written by the test with the same schema (see `tests/conftest.py`), private
+DuckDB connections, and `demo/fake_connect.py` for anything that talks to
+Connect. A test checks that the fake serves exactly Connect's export schema.
+
+To rebuild the Connect exports after Connect's export changes, run
+`just connect-fixtures [path-to-connect-checkout]`. It runs the generator in
+`tests/fixtures/connect_export_fixture_test.go` inside a throwaway connect-dev
+container, with the checkout mounted read-only.
+Importing `usage` does nothing; `app.py` runs the first `usage.load()`.
+
+`dev-requirements.txt` adds pytest, pyright, the pandas type stubs, and
+`websockets` for the session smoke test. None of it, `pytest.ini`,
+`pyrightconfig.json` or `tests/` is deployed.
+
+## Architecture
+
+`app:app` is the entrypoint. `app.py` is the shell and the wiring. It builds
+the page frame and the filter drawer, keeps the state that every page shares,
+and starts each page's server. The shared state is the loaded-data catalog, the
+filter dict `flt()`, the data refresh, bookmarks and URL query state, the
+topbar, the unpriced-model checks, and the CSV export registration. It also
+defines the page order.
+
+Each page lives in its own module and exposes `panel()`, its `nav_panel`, and
+`server(input, ctx)`:
+
+- `pages/overview.py`, `pages/adoption.py` and `pages/raw_data.py`.
+- `principals.py` is the Profiles page. It takes Raw Data's SQL builder, and
+  flags the outliers among each kind (`outliers`).
+
+`pages/context.py` defines `PageContext`, the explicit set of shared services a
+page server receives in place of importing `app.py`: `flt`, `cat`, `where`,
+`est_cost`, `register_export`, `formatted` and the rest.
+
+The helper modules hold no Shiny session state:
+
+- `usage.py` loads the export into DuckDB and reads Connect's price catalog
+  and content list.
+- `pricing.py` builds the spend SQL from the price catalog and rebuilds it
+  after a refresh.
+- `filters.py` turns the filter dict into a SQL `WHERE` clause and quotes
+  values. It also holds `TOKEN_COUNT`, the SQL for a row's token count.
+- `conversations.py` groups requests into conversations from data frames,
+  and holds the higher-cost flag (`HIGH_PCT`, `higher_cost`) that Profiles
+  uses.
+- `ui_shell.py` holds the navigation rail, the filter drawer and shared page
+  components.
+- `theme.py` holds the chart styling, palette and stat tiles.
 
 ## Deploy to Agave
 
@@ -46,7 +141,8 @@ OAuth. rsconnect opens a browser and stores the token:
 rsconnect login https://connect.agave.pwb.posit.it
 ```
 
-Then redeploy new code to the same content item:
+Then redeploy new code to the same content item. To deploy to any other server
+with an API key, run `just deploy <connect-url> <api-key>`.
 
 ```bash
 rsconnect deploy shiny . --server https://connect.agave.pwb.posit.it \

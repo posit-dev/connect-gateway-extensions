@@ -1,0 +1,8 @@
+{
+  "include": ["*.py", "pages", "tests", "demo"],
+  "exclude": [".venv", "rsconnect-python", "**/__pycache__", ".gateway-cache"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "basic"
+}

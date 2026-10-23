@@ -4,6 +4,9 @@
 # local secrets
 .env
 
+# the dashboard's saved copy of the usage export (see usage.py)
+.gateway-cache/
+
 # Python
 __pycache__/
 *.py[cod]
