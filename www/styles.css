@@ -255,8 +255,9 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
   text-overflow: ellipsis;
 }
 .tile-note { color: var(--text-muted); font-size: 0.78rem; min-height: 1em; }
-/* Where a principal stands against everyone (principals.versus_org): a tinted
-   badge loud enough to read next to the figure, then the two numbers. */
+/* Where a principal stands against its peers (principals.versus_peers): a
+   tinted badge loud enough to read next to the figure, then an outlier tag
+   when it is in the top 5%. */
 .versus-row {
   display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
   margin: 4px 0 6px;
@@ -287,11 +288,12 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
   background: color-mix(in srgb, var(--text-muted) 18%, transparent);
   border-color: color-mix(in srgb, var(--text-muted) 45%, transparent);
 }
-.versus-detail {
-  color: var(--text-primary);
-  font-size: 0.85rem;
-  font-variant-numeric: tabular-nums;
+.versus-outlier {
+  color: #c0413b;
+  background: color-mix(in srgb, #c0413b 16%, transparent);
+  border-color: color-mix(in srgb, #c0413b 55%, transparent);
 }
+[data-bs-theme="dark"] .versus-outlier { color: #f07a74; }
 /* Tiles in one row share a height, so a tile with a short note does not sit
    shorter than its neighbours. */
 .kpi-row > * { display: flex; }
@@ -444,9 +446,49 @@ body .card-body shiny-data-frame .shiny-data-grid {
   padding: 8px 2px 2px;
 }
 
-/* Profiles: the one-line readings under a chart. */
-.card-note {
-  color: var(--text-muted);
-  font-size: 0.85rem;
-  padding: 6px 14px 8px;
+/* Profiles: the box under the Conversations tab (principals.conv_summary): the
+   count on the left, then two bars splitting conversations and spend into the
+   higher-cost and normal camps, with a key under them. Styled as a stat tile. */
+.conv-summary {
+  display: flex; flex-wrap: wrap; gap: 14px 32px; align-items: center;
+  margin: 0 0 16px; padding: 16px 20px;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-top: 2px solid var(--card-accent);
+  border-radius: var(--radius);
+  color: var(--text-muted); font-size: 0.85rem;
 }
+.conv-summary-count { min-width: 150px; }
+.conv-summary-num {
+  color: var(--text-primary); font-size: 1.85rem; font-weight: 600; line-height: 1.2;
+}
+.conv-summary-label,
+.conv-split-label {
+  font-family: var(--font-mono); font-size: 0.68rem;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.conv-summary-sub { margin-top: 4px; }
+.conv-summary-splits {
+  flex: 0 1 640px; display: flex; flex-direction: column; gap: 6px;
+}
+.conv-split-row { display: flex; align-items: center; gap: 12px; }
+.conv-split-label { width: 110px; flex: none; text-align: right; }
+.conv-split-bar {
+  flex: 1; display: flex; height: 20px; border-radius: 4px; overflow: hidden;
+  background: var(--hairline);
+}
+.conv-split-seg {
+  display: flex; align-items: center; padding: 0 10px; min-width: 2px;
+  font-size: 0.75rem; font-weight: 600; white-space: nowrap; overflow: hidden;
+  font-variant-numeric: tabular-nums;
+}
+.conv-split-hi { color: #2b1d00; }
+.conv-split-lo { color: #ffffff; justify-content: flex-end; }
+.conv-split-seg + .conv-split-seg { border-left: 2px solid var(--surface-1); }
+.conv-summary-keys {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px;
+  padding-left: 122px; margin-top: 2px;
+}
+.conv-summary-key { display: inline-flex; align-items: center; gap: 2px; }
+.conv-summary-how { flex-basis: 100%; }
+

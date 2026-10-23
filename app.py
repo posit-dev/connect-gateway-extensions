@@ -28,13 +28,12 @@ from shiny import App, reactive, render, ui
 from starlette.requests import Request
 
 import principals
-import theme
 import usage
-from pages import adoption, attribution, overview, raw_data
+from pages import adoption, overview, raw_data
 from pages.context import PageContext
 from filters import TOKEN_COUNT, where
 from pricing import est_cost, est_cost_uncached
-from theme import card_usd, fmt_num
+from theme import card_usd
 from ui_shell import (
     FAVICON, NAV_FIRST, NAV_SECTIONS, _drawer, _shell, brand,
     filter_label, model_choices, nav_rail_ui, plural,
@@ -160,36 +159,6 @@ def fitted_grid(df: pd.DataFrame, **kw) -> render.DataGrid:
     return render.DataGrid(df, height=None if len(df) <= 12 else "420px", **kw)
 
 
-# How each numeric grid column is written for the eye, keyed by the name the
-# query gives it. Money is shown to the dollar because cents are noise next to a
-# monthly estimate, and counts get thousands separators.
-DISPLAY_FMT = {
-    # card_usd: whole dollars, but cents under $1, so 30 cents is not "$0"
-    "est_spend_usd": card_usd,
-    "tokens": lambda v: f"{v:,.0f}",
-    "per_request": lambda v: f"${v:,.4f}",
-    "x_median": lambda v: f"{v:,.1f}\u00d7",
-    "requests": lambda v: f"{v:,.0f}",
-    "calls": lambda v: f"{v:,.0f}",
-    "cache_hit_pct": lambda v: f"{v:,.0f}%",
-    "peak_input": fmt_num,
-    "peak_p75": lambda v: f"{v:,.0f}",
-}
-
-
-def formatted(df: pd.DataFrame) -> pd.DataFrame:
-    """A display copy of the frame, with numbers rendered as strings.
-
-    Only what is drawn is touched: the CSV exports read the unformatted frames.
-    """
-    out = df.copy()
-    for col, fmt in DISPLAY_FMT.items():
-        if col in out.columns:
-            # missing() is NaN and inf too: a ratio over zero is blank, not "inf".
-            out[col] = [None if theme.missing(v) else fmt(v) for v in out[col]]
-    return out
-
-
 
 def preset_range(preset: str, start: date, end: date) -> tuple[date, date]:
     """The dates a preset covers, resolved against the loaded window.
@@ -233,7 +202,6 @@ def with_clear(name: str, control: ui.Tag) -> ui.Tag:
 def app_ui(request: Request | None):
     return _shell(
         overview.panel(),
-        attribution.panel(),
         principals.panel(),
         adoption.panel(),
         raw_data.panel(),
@@ -392,7 +360,8 @@ def server(input, output, session):
     # bookmark is restored, and the browser falls back to the first tab, so the
     # browser is told which tab to show instead.
     _LEGACY_TABS = {"Audit log": "Raw Data", "Models": "Overview",
-                    "Attribution": "Top Spenders", "Principals": "Profiles"}
+                    "Attribution": "Profiles", "Top Spenders": "Profiles",
+                    "Principals": "Profiles"}
 
     @session.bookmark.on_restored
     def _fix_stale_tab(state):
@@ -405,7 +374,6 @@ def server(input, output, session):
         "dark_mode",
         "preset",
         "date_range",
-        "attr_kind",
         "pf_kind",
         "pf_pick",
         "grain",
@@ -684,16 +652,12 @@ def server(input, output, session):
     page_ctx = PageContext(
         flt=flt, where=where, cat=cat, est_cost=est_cost,
         register_export=register_export, register_sql_export=register_sql_export,
-        est_cost_uncached=est_cost_uncached, formatted=formatted,
-        fitted_grid=fitted_grid,
+        est_cost_uncached=est_cost_uncached, fitted_grid=fitted_grid,
     )
     overview.server(input, page_ctx)
     records_sql = raw_data.server(input, page_ctx)
 
-    open_profile = principals.server(input, page_ctx, records_sql)
-
-    # After Profiles: picking an outlier opens it there.
-    attribution.server(input, page_ctx, open_profile)
+    principals.server(input, page_ctx, records_sql)
     adoption.server(input, page_ctx)
 
 

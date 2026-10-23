@@ -109,10 +109,9 @@ defines the page order.
 Each page lives in its own module and exposes `panel()`, its `nav_panel`, and
 `server(input, ctx)`:
 
-- `pages/overview.py`, `pages/attribution.py`, `pages/adoption.py` and
-  `pages/raw_data.py`.
-- `principals.py` is the Profiles page. It takes Raw Data's SQL builder and
-  returns `open_profile`, which Top Spenders uses to open a pick on Profiles.
+- `pages/overview.py`, `pages/adoption.py` and `pages/raw_data.py`.
+- `principals.py` is the Profiles page. It takes Raw Data's SQL builder, and
+  flags the outliers among each kind (`outliers`).
 
 `pages/context.py` defines `PageContext`, the explicit set of shared services a
 page server receives in place of importing `app.py`: `flt`, `cat`, `where`,
@@ -128,11 +127,9 @@ The helper modules hold no Shiny session state:
   values. It also holds `TOKEN_COUNT`, the SQL for a row's token count.
 - `conversations.py` groups requests into conversations from data frames,
   and holds the higher-cost flag (`HIGH_PCT`, `higher_cost`) that Profiles
-  and Top Spenders use.
+  uses.
 - `ui_shell.py` holds the navigation rail, the filter drawer and shared page
   components.
-- `table_format.py` holds the column labels of the tables and
-  `GUID_LABEL_CHARS`, how much of a guid a chart label keeps.
 - `theme.py` holds the chart styling, palette and stat tiles.
 
 ## Deploy to Agave

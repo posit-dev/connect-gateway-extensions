@@ -9,6 +9,10 @@ little about whether it is unusual.
 The SQL and chart builders are plain functions of a WHERE clause, so they can be
 exercised without a browser; `server()` is only the glue to Shiny.
 
+Each principal is measured on spend, conversation cost and peak context. The
+ones in the top 5% of their kind on any of the three are outliers: listed first
+in the picker and tagged on the tiles.
+
 Groups come from the Connect groups API (see usage._fetch_groups). A user can be
 in several groups, so group totals overlap: the same request counts towards every
 group its user is in, and group spend does not add up to the whole.
@@ -16,8 +20,8 @@ group its user is in, and group spend does not add up to the whole.
 
 from __future__ import annotations
 
-import math
 from types import SimpleNamespace
+from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -28,10 +32,10 @@ import conversations as conv_tools
 import theme
 import usage
 from conversations import HIGH_PCT, MIN_BASELINE, higher_cost
-from filters import dim_sql
+from filters import TOKEN_COUNT, dim_sql
 from pages.context import PageContext
 from theme import apply, card_num, card_usd, empty_fig, fmt_usd, render_widget
-from ui_shell import empty_note, export_button, page_header, table_header
+from ui_shell import empty_note, export_button, help_icon, page_header, table_header
 
 KINDS = {"user": "User", "content": "Content", "session": "Session", "group": "Group"}
 NOUN = {"user": "user", "content": "content item", "session": "session", "group": "group"}
@@ -65,21 +69,105 @@ def short(s, n: int = 8) -> str:
 
 
 # ---- data -----------------------------------------------------------------------
+# What a principal can stand out on, and how the header and charts say so.
+OUTLIER_MEASURES = [
+    ("spend", "high estimated spend"),
+    ("conv_p75", "high conversation cost"),
+    ("peak_p75", "high peak context"),
+]
+# A principal at or above this percentile of its kind, on a measure, is an outlier.
+OUTLIER_PCT = 95
+# With fewer peers than this a percentile means little, so nobody is flagged.
+OUTLIER_MIN_N = 8
+
+
 def peers_df(kind: str, w: str, cost: str) -> pd.DataFrame:
-    """Every principal of a kind in view, with what the KPIs compare against."""
+    """Every principal of a kind in view, ranked by spend, with the measures
+    the KPI tiles and outlier flags judge."""
     src, key = kind_source(kind)
+    has_key = f"{key} IS NOT NULL AND CAST({key} AS VARCHAR) <> ''"
     extra = ", MAX(group_name) AS gname" if kind == "group" else ""
     df = usage.q(f"""
         SELECT {key} AS k, COALESCE(SUM({cost}), 0) AS spend, COUNT(*) AS requests,
-               SUM(cache_read_tokens) / NULLIF(SUM(input_tokens), 0) AS cache_share,
-               AVG(CASE WHEN status_code <> 200 THEN 1 ELSE 0 END) AS err,
+               COALESCE(SUM({TOKEN_COUNT}), 0) AS tokens,
                MAX(username) AS owner, MAX(workbench_session_name) AS sname{extra}
         FROM {src}
-        WHERE {w} AND {key} IS NOT NULL AND CAST({key} AS VARCHAR) <> ''
+        WHERE {w} AND {has_key}
         GROUP BY 1""")
+    # Conversation cost and peak context (the largest input of a conversation):
+    # a percentile of each across the principal's conversations.
+    peaks = usage.q(f"""
+        SELECT k, quantile_cont(est, {HIGH_PCT / 100}) AS conv_p75,
+               quantile_cont(peak, {HIGH_PCT / 100}) AS peak_p75
+        FROM (SELECT {key} AS k, SUM({cost}) AS est, MAX(input_tokens) AS peak FROM {src}
+              WHERE {w} AND {has_key} AND conversation_id IS NOT NULL
+              GROUP BY {key}, conversation_id)
+        GROUP BY k""")
+    df = df.merge(peaks, on="k", how="left")
     df = df.sort_values("spend", ascending=False, ignore_index=True)
     df["label"] = [peer_label(kind, r) for r in df.itertuples()]
+    # Two sessions can share a name, and a chart draws two bars with one label
+    # as one.
+    dup = df.label.duplicated(keep=False)
+    df.loc[dup, "label"] = [f"{lab} ({short(k, 6)})" for lab, k in zip(df.label[dup], df.k[dup])]
+    df["why"] = outliers(df)
     return df
+
+
+def outliers(df: pd.DataFrame) -> pd.Series:
+    """Why each principal stands out from its peers, or "" when it does not.
+
+    A principal is flagged on a measure when it is at or above the OUTLIER_PCT
+    percentile of its kind, and above the median (so a tie at the top of a flat
+    field is not an outlier). Each measure compares only the principals with a
+    value above zero for it.
+    """
+    why: dict = {i: [] for i in df.index}
+    for col, label in OUTLIER_MEASURES:
+        vals = peer_values(df, col)
+        if len(vals) < OUTLIER_MIN_N:
+            continue
+        high = (vals >= vals.quantile(OUTLIER_PCT / 100)) & (vals > vals.median())
+        for i in vals.index[high.to_numpy()]:
+            why[i].append(label)
+    return pd.Series([" + ".join(why[i]) for i in df.index], index=df.index, dtype=object)
+
+
+def peer_values(peers: pd.DataFrame, col: str) -> pd.Series:
+    """The values of one measure that peers are compared on: those above zero."""
+    vals = peers[col].dropna()
+    return vals[vals > 0]
+
+
+def principal_spend(w: str, cost: str) -> pd.DataFrame:
+    """One row per user and per content item in view, with its spend.
+
+    Unpriced traffic is kept (spend $0, requests counted): the point is a
+    complete list, not only the ones with a price.
+    """
+    parts = []
+    for dim, kind, extra in [
+        ("username", "user", "MAX(user_email)"),
+        ("content_guid", "content", "MAX(content_owner_username)"),
+    ]:
+        df = usage.q(f"""SELECT {dim} AS id, {extra} AS detail, COUNT(*) AS requests,
+                                COALESCE(SUM({TOKEN_COUNT}), 0) AS tokens,
+                                COALESCE(SUM({cost}), 0) AS est_spend_usd
+                         FROM gateway_events
+                         WHERE {w} AND {dim} IS NOT NULL AND {dim} <> ''
+                         GROUP BY 1""")
+        df.insert(0, "kind", kind)
+        df.insert(2, "name", [
+            str(i) if kind == "user" else (usage.content_name(i) or "")
+            for i in df.id
+        ])
+        # What the second column means depends on the kind.
+        df = df.rename(columns={"detail": "email" if kind == "user" else "owner"})
+        parts.append(df)
+    cols = ["kind", "id", "name", "email", "owner", "requests", "tokens", "est_spend_usd"]
+    out = pd.concat(parts, ignore_index=True).reindex(columns=cols)
+    out["est_spend_usd"] = out.est_spend_usd.round(4)
+    return out.sort_values(["est_spend_usd", "requests"], ascending=False, ignore_index=True)
 
 
 def peer_label(kind: str, r) -> str:
@@ -93,20 +181,6 @@ def peer_label(kind: str, r) -> str:
     return str(r.gname)
 
 
-def stats(w: str, p: str, cost: str) -> pd.Series:
-    return usage.q(f"""
-        SELECT COALESCE(SUM({cost}), 0) AS spend, COUNT(*) AS requests,
-               SUM(input_tokens) AS tin, SUM(output_tokens) AS tout,
-               SUM(cache_read_tokens) AS cr,
-               SUM(CASE WHEN status_code <> 200 THEN 1 ELSE 0 END) AS errors,
-               SUM(CASE WHEN finish_reason = 'max_tokens' THEN 1 ELSE 0 END) AS truncated,
-               quantile_cont(duration_ms, 0.5) AS p50,
-               quantile_cont(duration_ms, 0.95) AS p95,
-               COUNT(DISTINCT day) AS days, MIN(ts) AS first, MAX(ts) AS last,
-               COUNT(DISTINCT conversation_id) AS convs
-        FROM gateway_events WHERE {w} AND {p}""").iloc[0]
-
-
 def identity(kind: str, key: str, w: str, cost: str) -> dict:
     """What the header says about one principal."""
     p = pred(kind, key)
@@ -116,8 +190,6 @@ def identity(kind: str, key: str, w: str, cost: str) -> dict:
                         FROM gateway_events WHERE {p}""").iloc[0]
         out["email"] = r.email
         out["teams"] = r.teams
-        out["via"] = usage.q(f"""SELECT user_kind AS via, SUM({cost}) s FROM gateway_events
-                                 WHERE {w} AND {p} GROUP BY 1 ORDER BY s DESC""")
         out["groups"] = usage.q(f"""
             SELECT DISTINCT group_name FROM user_groups WHERE user_guid IN
               (SELECT DISTINCT user_guid FROM gateway_events WHERE {p})
@@ -283,16 +355,27 @@ def conversations(w: str, p: str, cost: str) -> pd.DataFrame:
     return df
 
 
-# Within this fraction of everyone's line, a principal reads as "in line" rather
+# Within this fraction of the typical peer, a principal reads as "in line" rather
 # than above or below: a few percent either way is noise, not a habit.
 VERSUS_EVEN = 0.05
 
 
-def versus_org(mine: float, org: float, say, title: str) -> ui.Tag:
-    """A badge saying where this principal's p75 (the tile's figure) sits
-    against everyone's ("typical"), and everyone's figure beside it. Lower is
-    better for every measure it is used on (cost, context), so below is green
-    and above is amber."""
+def versus_peers(e: SimpleNamespace, col: str, enough: bool = True) -> ui.Tag | None:
+    """A badge saying where this principal's figure for one measure sits against
+    the typical (median) peer, and an outlier tag when the principal is in the
+    top 5% of its kind on it. Lower is better for every measure (spend, cost,
+    context), so below is green and above is amber. With `enough` false the
+    principal's own figure is too thin to compare, so only the tag is shown.
+    The figures behind them are in the tile's help (`typical_help`)."""
+    vals = peer_values(e.peers, col)
+    if vals.empty:
+        return None
+    org, r = float(vals.median()), e.peers.iloc[e.rank - 1]
+    mine = r[col]
+    flag = dict(OUTLIER_MEASURES)[col] in r.why.split(" + ")
+    tag = ui.span("outlier", class_="versus versus-outlier") if flag else None
+    if not enough or pd.isna(mine):
+        return ui.div(tag, class_="versus-row") if tag else None
     d = mine / org - 1 if org else 0.0
     if abs(d) < VERSUS_EVEN:
         cls, text = "even", "\u2248 typical"
@@ -300,11 +383,31 @@ def versus_org(mine: float, org: float, say, title: str) -> ui.Tag:
         cls, text = "below", f"\u25bc {-d:.0%} below typical"
     else:
         cls, text = "above", f"\u25b2 {d:.0%} above typical"
-    return ui.div(
-        ui.span(text, class_=f"versus versus-{cls}"),
-        ui.span(say(org), class_="versus-detail"),
-        class_="versus-row", title=title,
-    )
+    return ui.div(ui.span(text, class_=f"versus versus-{cls}"), tag, class_="versus-row")
+
+
+def typical_help(e: SimpleNamespace, col: str, say, about: str, *extra) -> ui.Tag:
+    """The help beside a KPI tile: what the measure is, the typical peer it is
+    compared with, and where the outlier line sits."""
+    vals = peer_values(e.peers, col)
+    body: list = [ui.p(about)]
+    if not vals.empty:
+        body.append(ui.p(
+            ui.strong(f"Typical {e.noun}: {say(float(vals.median()))}"),
+            f", the median of the {len(vals):,} {e.noun}s in view. The badge says how "
+            f"far this {e.noun} is above or below it."))
+    if len(vals) >= OUTLIER_MIN_N:
+        line = say(float(vals.quantile(OUTLIER_PCT / 100)))
+        body.append(ui.p(
+            ui.strong("Outlier"),
+            f" marks the top {100 - OUTLIER_PCT}% of {e.noun}s: {line} or more."))
+    else:
+        body.append(ui.p(
+            f"With fewer than {OUTLIER_MIN_N} {e.noun}s to compare, nobody is "
+            "marked an outlier."))
+    body.extend(ui.p(x) for x in extra if x)
+    body[-1] = ui.p(*body[-1].children, class_="mb-0")
+    return help_icon(*body)
 
 
 # ---- figures ------------------------------------------------------------------------
@@ -424,6 +527,27 @@ def panel():
                 ),
                 class_="pf-pick",
             ),
+            # Every user and every content item with its spend, for an admin to
+            # take into another tool. Not tied to the kind or the pick.
+            ui.div(
+                export_button("dl_principal_spend", "Export spend by principal"),
+                help_icon(
+                    "Spend by principal",
+                    ui.p(
+                        "A CSV with one row per user and one per content item in "
+                        "view: its kind (user or content), id, name, requests, "
+                        "tokens and estimated spend, largest first. It follows the "
+                        "date range and filters."
+                    ),
+                    ui.p(
+                        "A request from content is charged to both the content item "
+                        "and a user, so the user rows and the content rows each add "
+                        "up to their own total; do not add the two together.",
+                        class_="mb-0",
+                    ),
+                ),
+                class_="hdr-flex-left ms-auto",
+            ),
             class_="page-switch",
         ),
         ui.output_ui("pf_header"),
@@ -433,10 +557,15 @@ def panel():
         ui.panel_conditional("input.pf_pick", ui.div(ui.navset_underline(
             ui.nav_panel(
                 "Conversations",
+                ui.output_ui("pf_conv_summary"),
                 ui.card(
                     ui.card_header(
                         ui.div(
-                            ui.span(ui.output_text("pf_conv_chart_title", inline=True)),
+                            ui.div(
+                                ui.span(ui.output_text("pf_conv_chart_title", inline=True)),
+                                ui.output_ui("pf_conv_help", inline=True),
+                                class_="hdr-flex-left",
+                            ),
                             ui.div(
                                 ui.div(
                                     ui.input_radio_buttons(
@@ -452,7 +581,6 @@ def panel():
                         )
                     ),
                     output_widget("pf_conv_spend"),
-                    ui.output_ui("pf_conv_groups_note"),
                 ),
             ),
             ui.nav_panel(
@@ -510,13 +638,9 @@ def panel():
 
 # ---- server ------------------------------------------------------------------------
 def server(input, ctx: PageContext, records_sql):
-    """Wire the tab. `records_sql` is the Raw Data page's SQL builder.
-
-    Returns open_profile(kind, key), to jump here from elsewhere.
-    """
+    """Wire the tab. `records_sql` is the Raw Data page's SQL builder."""
     flt, where, est_cost = ctx.flt, ctx.where, ctx.est_cost
     register_export, register_sql_export = ctx.register_export, ctx.register_sql_export
-    pending: reactive.Value = reactive.value(None)
 
     @reactive.calc
     def peers() -> pd.DataFrame:
@@ -526,18 +650,22 @@ def server(input, ctx: PageContext, records_sql):
     def _choices():
         df = peers()
         with reactive.isolate():
-            cur, want = input.pf_pick(), pending.get()
-        choices = {k: f"{lab} \u2014 {card_usd(s)}" for k, lab, s in zip(df.k, df.label, df.spend)}
-        sel = want if want in choices else cur if cur in choices else next(iter(choices), None)
-        pending.set(None)
-        ui.update_selectize("pf_pick", choices=choices, selected=sel)
+            cur = input.pf_pick()
+        # Outliers first, in a group of their own, so the page opens on the
+        # biggest one.
+        def options(d: pd.DataFrame) -> dict[str, str]:
+            return {str(k): f"{lab} \u2014 {card_usd(s)}"
+                    for k, lab, s in zip(d.k, d.label, d.spend)}
 
-    def open_profile(kind: str, key: str):
-        pending.set(key)
-        ui.update_radio_buttons("pf_kind", selected=kind)
-        if input.pf_kind() == kind:
-            ui.update_selectize("pf_pick", selected=key)
-        ui.update_navset("main_tabs", selected="Profiles")
+        flagged = df.why != ""
+        choices: dict[str, Any] = options(df)
+        if flagged.any():
+            choices = {f"Outliers ({flagged.sum():,} of {len(df):,})": options(df[flagged])}
+            if not flagged.all():
+                choices["Others"] = options(df[~flagged])
+        keys = [str(k) for k in pd.concat([df.k[flagged], df.k[~flagged]])]
+        sel = cur if cur in keys else next(iter(keys), None)
+        ui.update_selectize("pf_pick", choices=choices, selected=sel)
 
     @reactive.calc
     def ent() -> SimpleNamespace:
@@ -563,22 +691,12 @@ def server(input, ctx: PageContext, records_sql):
             return empty_note(f"No {NOUN[kind]}s in this view.{why}")
         e = ent()
         info = identity(e.kind, e.key, e.w, e.cost)
-        n = len(e.peers)
-        top_pct = math.ceil(100 * e.rank / n) / 100 if n else 1
-        facts: list[tuple[str, ui.TagChild]] = [
-            ("rank", f"#{e.rank} of {n:,} {e.noun}s by estimated spend \u00b7 top {top_pct:.0%}")
-        ]
+        facts: list[tuple[str, ui.TagChild]] = []
         sub = KINDS[e.kind]
         if e.kind == "user":
             sub = info["email"] or "user"
-            via = info["via"]
-            tot = via.s.fillna(0).sum()
-            # Shares of spend; with none priced (all unpriced models) there is
-            # no share to give, only how they were charged.
-            facts.append(("charged as", " \u00b7 ".join(
-                f"{v} {s / tot:.0%}" if tot and not theme.missing(s) else str(v)
-                for v, s in zip(via.via, via.s))))
-            facts.append(("Connect groups", chips(info["groups"]) or "none found"))
+            if info["groups"]:
+                facts.append(("Groups", chips(info["groups"])))
         elif e.kind == "content":
             sub = e.key
             link = f"{usage.connect_server()}/connect/#/apps/{e.key}"
@@ -617,71 +735,58 @@ def server(input, ctx: PageContext, records_sql):
 
     @render.ui
     def pf_kpis():
+        # Three tiles, each this principal's figure set against the typical
+        # (median) peer of its kind, with an outlier tag in the top 5%. The
+        # figures are the same ones peers_df ranks and flags; the typical
+        # figure and the outlier line are in each tile's help.
         e = ent()
-        s = stats(e.w, e.p, e.cost)
-        cr = 0 if theme.missing(s.cr) else s.cr
-        cache = None if theme.missing(s.tin) or not s.tin else cr / s.tin
+        r = e.peers.iloc[e.rank - 1]
+        thin = (f"This {e.noun} has fewer than {MIN_BASELINE} conversations, too few "
+                "for its own percentile to compare.")
+        spend = theme.stat_tile(
+            "Estimated spend", card_usd(r.spend), versus_peers(e, "spend"),
+            help=typical_help(e, "spend", fmt_usd,
+                              f"This {e.noun}'s estimated spend in view."))
         cv = convs()
         if cv.empty:
-            conv = theme.stat_tile(f"Conversation cost (p{HIGH_PCT:g})", DASH,
+            conv = theme.stat_tile("Conversation cost", DASH,
                                    "no conversation ids in view")
         else:
-            # One tile: this principal's HIGH_PCT percentile as the figure, set
-            # against everyone's, and under it how much of the spend sits in the
-            # costliest conversations, those above that percentile.
+            # How much of the spend sits in the costliest conversations, those
+            # above this principal's HIGH_PCT percentile.
             run, total = cv[cv.high], cv.est.sum()
-            if len(cv) < MIN_BASELINE:
-                flagged = f"needs {MIN_BASELINE}+ conversations to flag the most expensive"
-            elif total and len(run):
-                flagged = ui.span(
-                    f"{run.est.sum() / total:.0%} of spend ({fmt_usd(run.est.sum())}) is in "
-                    f"the {len(run):,} conversations above p{HIGH_PCT:g}",
-                    title=f"Conversations costing more than {HIGH_PCT:g}% of this "
-                          f"{NOUN[e.kind]}'s conversations.")
-            else:
-                flagged = f"none above p{HIGH_PCT:g}"
-            # Where this principal's p75 sits against the whole server's.
-            org = org_line()
-            own = float(cv.line.iloc[0])
-            if org is None:
-                versus = None
-            elif len(cv) < MIN_BASELINE:
-                versus = ui.div(f"Everyone's p{HIGH_PCT:g}: {fmt_usd(org)}")
-            else:
-                versus = versus_org(
-                    own, org, fmt_usd,
-                    f"Typical: the p{HIGH_PCT:g} of conversation cost across every "
-                    "conversation in view.")
+            enough = len(cv) >= MIN_BASELINE
+            share = (
+                f"{run.est.sum() / total:.0%} of this {e.noun}'s spend "
+                f"({fmt_usd(run.est.sum())}) is in its {len(run):,} conversations "
+                f"above p{HIGH_PCT:g}." if enough and total and len(run) else None)
             conv = theme.stat_tile(
-                f"Conversation cost (p{HIGH_PCT:g})", fmt_usd(own),
-                ui.div(versus, ui.div(flagged)))
+                "Conversation cost",
+                DASH if pd.isna(r.conv_p75) else fmt_usd(r.conv_p75),
+                versus_peers(e, "conv_p75", enough=enough),
+                help=typical_help(
+                    e, "conv_p75", fmt_usd,
+                    f"The p{HIGH_PCT:g} of the estimated cost of this {e.noun}'s "
+                    "conversations; the typical figure is the median of each "
+                    f"{e.noun}'s p{HIGH_PCT:g}.",
+                    share, None if enough else thin))
         peaks = cv.peak_context.dropna() if not cv.empty else pd.Series(dtype=float)
         if len(peaks) == 0:
-            ctx = theme.stat_tile(f"Peak context (p{HIGH_PCT:g})", DASH,
+            ctx = theme.stat_tile("Peak context", DASH,
                                   "no conversation ids in view")
         else:
-            line = org_peak_line()
-            mine = float(peaks.quantile(HIGH_PCT / 100))
-            if line is None:
-                note = f"needs {MIN_BASELINE}+ conversations overall for a p{HIGH_PCT:g} line"
-            elif len(peaks) < MIN_BASELINE:
-                note = f"Everyone's p{HIGH_PCT:g}: {card_num(line)} tokens"
-            else:
-                note = versus_org(
-                    mine, line, card_num,
-                    "Peak context is the largest input any request in a conversation sent. "
-                    f"Typical: the p{HIGH_PCT:g} across every conversation "
-                    "in tokens.")
-            ctx = theme.stat_tile(f"Peak context (p{HIGH_PCT:g})", card_num(mine), note)
-        return ui.layout_columns(
-            theme.stat_tile("Estimated spend", card_usd(s.spend),
-                            f"{card_num(s.requests)} requests"),
-            theme.stat_tile("Cache hit", theme.fmt_pct(None if cache is None else 100 * cache),
-                            "of input read from the prompt cache"),
-            conv,
-            ctx,
-            col_widths=[2, 2, 4, 4], class_="kpi-row",
-        )
+            enough = len(peaks) >= MIN_BASELINE
+            ctx = theme.stat_tile(
+                "Peak context", card_num(r.peak_p75),
+                versus_peers(e, "peak_p75", enough=enough),
+                help=typical_help(
+                    e, "peak_p75", lambda v: f"{card_num(v)} tokens",
+                    "Peak context is the largest input any request in a conversation "
+                    f"sent. This is the p{HIGH_PCT:g} of it across this {e.noun}'s "
+                    f"conversations; the typical figure is the median of each "
+                    f"{e.noun}'s p{HIGH_PCT:g}.",
+                    None if enough else thin))
+        return ui.layout_columns(spend, conv, ctx, col_widths=[4, 4, 4], class_="kpi-row")
 
     @render_widget
     def pf_trend():
@@ -740,28 +845,6 @@ def server(input, ctx: PageContext, records_sql):
         return conversations(e.w, e.p, e.cost)
 
     @reactive.calc
-    def org_convs() -> pd.DataFrame:
-        e = ent()
-        return conversations(e.w, "TRUE", e.cost)
-
-    @reactive.calc
-    def org_line() -> float | None:
-        """The HIGH_PCT percentile of conversation cost across everyone in view."""
-        everyone = org_convs()
-        if len(everyone) < MIN_BASELINE:
-            return None
-        return float(everyone.est.quantile(HIGH_PCT / 100))
-
-    @reactive.calc
-    def org_peak_line() -> float | None:
-        """The HIGH_PCT percentile of peak context (the largest input, cached and
-        uncached together, any request in the conversation sent) across everyone."""
-        peaks = org_convs().peak_context.dropna()
-        if len(peaks) < MIN_BASELINE:
-            return None
-        return float(peaks.quantile(HIGH_PCT / 100))
-
-    @reactive.calc
     def conv_by() -> str:
         return input.pf_conv_by() or "context"
 
@@ -785,21 +868,30 @@ def server(input, ctx: PageContext, records_sql):
 
     @render_widget
     def pf_conv_spend():
-        g = conv_grouped()
-        return conv_tools.conv_spend_fig(g.groups, conv_by(), flt()["mode"], HIGH_PCT)
+        g, by, mode = conv_grouped(), conv_by(), flt()["mode"]
+        if by in conv_tools.CURVE_X:
+            return conv_tools.conv_cumulative_fig(g.df, by, mode, HIGH_PCT)
+        return conv_tools.conv_donuts_fig(g.groups, mode, HIGH_PCT)
 
     @render.ui
-    def pf_conv_groups_note():
-        n = len(conv_grouped().df)
-        if n < MIN_BASELINE:
-            return ui.div(
-                f"Only {n} conversations: too few to flag the most expensive "
-                f"(needs {MIN_BASELINE}+).", class_="card-note")
-        return ui.div(
-            f"Shares are of this {NOUN[input.pf_kind()]}'s own conversations. "
-            f"Higher cost means above p{HIGH_PCT} of them."
-            + (f" Across everyone, p{HIGH_PCT} is {fmt_usd(org_line())}."
-               if org_line() is not None else ""), class_="card-note")
+    def pf_conv_summary():
+        return conv_summary(convs(), ent().noun, flt()["mode"])
+
+    @render.ui
+    def pf_conv_help():
+        by = conv_by()
+        what = CONV_VIEW_HELP[by]
+        if by in conv_tools.CURVE_X:
+            how = ("Each line adds up its own spend from left to right, so a line that "
+                   "climbs late means that spend sits at the high end. The further apart "
+                   "the two lines, the more this measure sets the costly conversations "
+                   "apart from the rest.")
+        else:
+            how = ("Each donut splits spend into higher-cost and normal conversations. The "
+                   "number inside is the higher-cost share, amber when it is "
+                   f"{conv_tools.DONUT_ABOVE:.0%} or more above the share for all "
+                   "conversations.")
+        return help_icon(conv_tools.CONV_BY[by], ui.p(what), ui.p(how, class_="mb-0"))
 
     register_export("pf_conv_groups",
                     lambda: conv_tools.conv_group_table(conv_grouped().groups),
@@ -812,7 +904,100 @@ def server(input, ctx: PageContext, records_sql):
         "profile_records.csv",
     )
 
-    return open_profile
+    register_export("principal_spend", lambda: principal_spend(where(flt()), est_cost()),
+                    "spend_by_principal.csv")
+
+
+# What each view of the conversation chart measures, for its help.
+CONV_VIEW_HELP = {
+    "context": "Peak context: the largest input any request in the conversation sent, "
+               "cached and uncached tokens alike.",
+    "model": "Each conversation counts under the model it spent most on.",
+    "duration": "Duration: the time from a conversation's first request to its last.",
+    "turns": "Turns: the number of requests in the conversation.",
+    "pace": "Pace: the typical (median) pause between a conversation's requests. "
+            "Single-request conversations have no pause and are left out.",
+    "cache": "Caching: the share of the conversation's input read from the prompt cache.",
+    "tool": "Each conversation counts under the harness it spent most through, read "
+            "from the User-Agent header.",
+}
+
+
+def conv_summary(cv: pd.DataFrame, noun: str, mode: str) -> ui.Tag:
+    """The box at the top of the Conversations tab: how many conversations
+    there are, where the higher-cost line sits, and how the two camps split
+    the count and the spend."""
+    n = len(cv)
+    if not n:
+        return ui.div(f"No conversations for this {noun} in view.", class_="conv-summary")
+    priced = cv[cv.est > 0]
+    unpriced = n - len(priced)
+    count = ui.div(
+        ui.div(f"{n:,}", class_="conv-summary-num"),
+        ui.div("conversations", class_="conv-summary-label"),
+        ui.div(f"{unpriced:,} with no estimated spend", class_="conv-summary-sub")
+        if unpriced else None,
+        class_="conv-summary-count",
+    )
+    if n < MIN_BASELINE:
+        return ui.div(count, ui.div(
+            f"Too few to split by cost: a conversation is marked higher cost against "
+            f"this {noun}'s p{HIGH_PCT:g}, which needs {MIN_BASELINE}+ conversations.",
+            class_="conv-summary-how"), class_="conv-summary")
+    total, line = float(priced.est.sum()), float(cv.line.iloc[0])
+    hi, lo = cv[cv.high], cv[~cv.high]
+    colours = (theme.STATUS["warning"], theme.TOKENS[mode]["series"][0])
+
+    def split(label: str, parts: list[tuple[float, str]]) -> ui.Tag:
+        """One labelled bar, higher cost then normal, each part as wide as its share."""
+        whole = sum(v for v, _ in parts) or 1
+        segs = []
+        for (v, text), colour, cls in zip(parts, colours, ("hi", "lo")):
+            share = v / whole
+            segs.append(ui.div(
+                # A thin part keeps its title; its text would not fit.
+                f"{text} \u00b7 {share:.0%}" if share >= 0.12 else "",
+                class_=f"conv-split-seg conv-split-{cls}",
+                style=f"width:{share:.2%};background:{colour}",
+                title=f"{text} \u00b7 {share:.0%}",
+            ))
+        return ui.div(ui.div(label, class_="conv-split-label"),
+                      ui.div(*segs, class_="conv-split-bar"), class_="conv-split-row")
+
+    def key(colour: str, name: str) -> ui.Tag:
+        return ui.span(ui.span(class_="tile-dot", style=f"background:{colour}"),
+                       f" {name}", class_="conv-summary-key")
+
+    return ui.div(
+        count,
+        ui.div(
+            split("conversations", [(len(hi), f"{len(hi):,}"), (len(lo), f"{len(lo):,}")]),
+            split("spend", [(float(hi.est.sum()), fmt_usd(float(hi.est.sum()))),
+                            (float(lo.est.sum()), fmt_usd(float(lo.est.sum())))]),
+            ui.div(
+                key(colours[0], "higher cost"),
+                key(colours[1], "normal"),
+                help_icon(
+                    "Higher cost and normal",
+                    ui.p(
+                        ui.strong("Higher cost"),
+                        f" conversations cost more than {HIGH_PCT:g}% of this {noun}'s "
+                        f"own conversations: over {fmt_usd(line)}, its p{HIGH_PCT:g}. ",
+                        ui.strong("Normal"), " is the rest.",
+                    ),
+                    ui.p(
+                        f"The line is drawn from this {noun}'s own conversations, "
+                        "so it fits their usage rather than a fixed dollar amount. A "
+                        "conversation's cost is the estimated cost of all its requests.",
+                        class_="mb-0",
+                    ),
+                ),
+                class_="conv-summary-keys",
+            ),
+            class_="conv-summary-splits",
+        ),
+        class_="conv-summary",
+    ) if total else ui.div(count, class_="conv-summary")
 
 
 def chips(names: list[str]):

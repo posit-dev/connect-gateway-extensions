@@ -18,7 +18,7 @@ from shiny import reactive, ui
 import filters
 import pricing
 import principals
-from pages import adoption, attribution, overview, raw_data
+from pages import adoption, overview, raw_data
 from pages.context import PageContext
 
 
@@ -43,49 +43,59 @@ def make_ctx(f):
                 else lambda name, fn, filename: sql_exports.update({name: (fn, filename)})
             ),
             est_cost_uncached=pricing.est_cost_uncached,
-            formatted=app.formatted, fitted_grid=app.fitted_grid,
+            fitted_grid=app.fitted_grid,
         )
         return ctx, exports
 
     return make
 
 
-def test_attribution_ranking_and_export(loaded, f, make_ctx):
-    def attribution_export():
-        ctx, exports = make_ctx()
-        inputs = SimpleNamespace(attr_kind=lambda: "all")
-        attribution.server(inputs, ctx, lambda kind, key: None)
-        with reactive.isolate():
-            return exports, exports["attr"][0]()
-
-    exports, df = attribution_export()
-    assert list(exports) == ["principal_spend", "attr"]
-    assert exports["attr"][1] == "attribution.csv"
-    assert df.columns.tolist() == [
-        "kind", "id", "name", "detail", "why", "est_spend_usd", "requests",
-        "per_request", "x_median", "tokens", "peak_p75",
-    ]
-    assert set(df.kind) == {"user", "content", "session"}
-    assert (df.est_spend_usd > 0).all()
-    assert df.est_spend_usd.tolist() == sorted(df.est_spend_usd, reverse=True)
-    users = df[df.kind == "user"]
-    user_spend = loaded.scalar(f"""SELECT SUM(s) FROM (
-        SELECT SUM({pricing.est_cost()}) s FROM gateway_events
-        WHERE {filters.where(f)} AND username IS NOT NULL AND username <> ''
-        GROUP BY username HAVING SUM({pricing.est_cost()}) > 0)""")
-    assert users.est_spend_usd.sum() == pytest.approx(user_spend)
-    assert users.id.tolist() == users.name.tolist()
+def test_peers_rank_and_flag_outliers(loaded, f):
+    w, cost = filters.where(f), pricing.est_cost()
+    users = principals.peers_df("user", w, cost)
+    assert users.spend.tolist() == sorted(users.spend, reverse=True)
+    assert users.spend.sum() == pytest.approx(loaded.scalar(
+        f"SELECT SUM({cost}) FROM gateway_events WHERE {w} AND username IS NOT NULL"))
+    assert users.label.is_unique
+    # The fake Connect has a content item whose every prompt is huge.
+    content = principals.peers_df("content", w, cost)
+    reasons = {r for why in content.why for r in why.split(" + ") if r}
+    assert {"high estimated spend", "high peak context"} <= reasons
+    assert (content.why != "").sum() < len(content) / 2
 
 
-def test_spend_by_principal_export_lists_every_user_and_content_item(loaded, f, make_ctx):
-    ctx, exports = make_ctx()
-    attribution.server(SimpleNamespace(attr_kind=lambda: "session"), ctx, lambda k, v: None)
-    with reactive.isolate():
-        df = exports["principal_spend"][0]()
-    assert exports["principal_spend"][1] == "spend_by_principal.csv"
+def test_kpi_badges_compare_to_peers_and_tag_outliers(loaded, f):
+    peers = principals.peers_df("content", filters.where(f), pricing.est_cost())
+    e = SimpleNamespace(peers=peers, rank=1, noun="content item")
+    # The runaway content item is first by spend and an outlier on it.
+    top = str(principals.versus_peers(e, "spend"))
+    assert "above typical" in top and "versus-outlier" in top
+    # The figures behind the badges are in the tile's help.
+    help = str(principals.typical_help(e, "spend", principals.fmt_usd, "Spend.", "Extra."))
+    assert "Typical content item: " in help and "Outlier" in help and "Extra." in help
+    e.rank = len(peers)
+    assert "versus-outlier" not in str(principals.versus_peers(e, "spend"))
+    # Too few conversations of its own: no above/below badge.
+    assert principals.versus_peers(e, "conv_p75", enough=False) is None
+
+
+def test_conversation_summary_splits_the_two_camps():
+    est = pd.Series([1.0] * 30 + [10.0] * 10)
+    cv = pd.DataFrame({"est": est})
+    cv[["high", "line"]] = principals.higher_cost(cv.est)
+    box = str(principals.conv_summary(cv, "user", "dark"))
+    # 10 of 40 cost $10, the rest $1: $100 of $130 is in the higher-cost camp
+    assert "40" in box and "higher cost" in box and "normal" in box
+    # the conversations bar is 10 of 40, the spend bar $100 of $130
+    assert "10 \u00b7 25%" in box and "\u00b7 77%" in box
+    few = str(principals.conv_summary(cv.head(3), "user", "dark"))
+    assert "Too few to split" in few and "normal" not in few
+
+
+def test_spend_by_principal_export_lists_every_user_and_content_item(loaded, f):
+    df = principals.principal_spend(filters.where(f), pricing.est_cost())
     assert df.columns.tolist() == [
         "kind", "id", "name", "email", "owner", "requests", "tokens", "est_spend_usd"]
-    # Not tied to the Show toggle: users and content, whatever it says.
     assert set(df.kind) == {"user", "content"}
     where = filters.where(f)
     for kind, col in (("user", "username"), ("content", "content_guid")):
@@ -111,7 +121,8 @@ def test_principals_panel_outputs():
         "pf_kind", "pf_pick", "pf_header", "pf_kpis", "pf_grain", "pf_trend",
         "pf_models", "pf_providers", "pf_origins",
         "dl_pf_records", "pf_rel_0_chart", "dl_pf_rel_1",
-        "pf_conv_by", "pf_conv_spend", "pf_conv_groups_note", "dl_pf_conv_groups",
+        "pf_conv_by", "pf_conv_summary", "pf_conv_spend", "pf_conv_help", "dl_pf_conv_groups",
+        "dl_principal_spend",
     ):
         assert f'id="{output_id}"' in html
 
@@ -126,11 +137,11 @@ def test_principals_exports_use_raw_data_sql(loaded, f, make_ctx):
         pf_conv_by=lambda: "model", pf_grain=lambda: "day",
     )
     records_sql = raw_data.server(inputs, ctx)
-    open_profile = principals.server(inputs, ctx, records_sql)
-    assert callable(open_profile)
+    principals.server(inputs, ctx, records_sql)
     assert {name: filename for name, (_, filename) in exports.items()} == {
         "pf_rel_0": "pf_connections_1.csv", "pf_rel_1": "pf_connections_2.csv",
         "pf_conv_groups": "profile_conversation_groups.csv",
+        "principal_spend": "spend_by_principal.csv",
     }
     assert sql_exports["pf_records"][1] == "profile_records.csv"
 

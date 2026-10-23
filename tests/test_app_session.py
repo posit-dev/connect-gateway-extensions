@@ -24,7 +24,6 @@ PAGE_OUTPUTS = {
     "Overview": ["kpis", "spend_time", "cache_savings_time",
                  "cache_rate_time", "errors_time"],
     "Adoption": ["adoption_kpis", "adoption_lines", "tool_time", "model_time"],
-    "Top Spenders": ["attr_kpis", "attr_bars", "attr_scatter", "attr_table"],
     "Raw Data": ["records_table", "records_title"],
     "Shell": ["nav_rail", "topbar_meta", "topbar_status"],
 }
@@ -175,18 +174,16 @@ def test_refresh_reloads_in_the_background_and_says_so(app_server):
 def test_csv_downloads_are_registered_and_streamed(app_server):
     async def scenario(session: Session, first: Reply, html: str):
         return first, {k: session.download(k)
-                       for k in ("dl_adoption", "dl_attr",
-                                 "dl_records", "dl_principal_spend")}
+                       for k in ("dl_adoption", "dl_records", "dl_principal_spend")}
 
     reply, files = visit(app_server, scenario)
     assert sorted(k for k in reply.values if k.startswith("dl_")) == [
-        "dl_adoption", "dl_attr", "dl_pf_conv_groups",
+        "dl_adoption", "dl_pf_conv_groups",
         "dl_pf_records", "dl_pf_rel_0", "dl_pf_rel_1", "dl_principal_spend", "dl_records",
     ]
     for name, body in files.items():
         rows = csv_rows(body)
         assert rows, f"{name} is empty"
-    assert "est_spend_usd" in files["dl_attr"].splitlines()[0]
     assert files["dl_principal_spend"].splitlines()[0] == (
         "kind,id,name,email,owner,requests,tokens,est_spend_usd")
 
@@ -223,7 +220,6 @@ class TestBookmark:
         "records_table_data_view_rows": list(range(2000)),
         "records_table_cell_selection": {"type": "none"},
         "spend_time_state": {"layout": "x" * 3000},
-        "attr_table_data_view_selected": list(range(500)),
     }
 
     def test_the_url_names_filter_inputs_only_and_stays_short(self, app_server):
@@ -233,7 +229,7 @@ class TestBookmark:
         reply = visit(app_server, scenario)
         (url,) = reply.query_strings()
         assert set(bookmark_query(url)) == {
-            "_inputs_", "preset", "grain", "group_by", "attr_kind", "pf_kind", "pf_pick", "date_range",
+            "_inputs_", "preset", "grain", "group_by", "pf_kind", "pf_pick", "date_range",
             "f_users", "f_contents", "f_sessions", "f_providers", "f_models", "f_meta",
             "dark_mode", "main_tabs",
         }
@@ -264,7 +260,8 @@ class TestBookmark:
 
     @pytest.mark.parametrize("old, new", [
         ("Audit log", "Raw Data"), ("Models", "Overview"),
-        ("Attribution", "Top Spenders"), ("Principals", "Profiles"),
+        ("Attribution", "Profiles"), ("Top Spenders", "Profiles"),
+        ("Principals", "Profiles"),
     ])
     def test_a_bookmark_from_a_renamed_tab_still_opens_a_page(self, app_server, old, new):
         query = f"?_inputs_&main_tabs={quote(json.dumps(old))}"

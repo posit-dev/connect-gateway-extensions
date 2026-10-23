@@ -87,7 +87,7 @@ USERS = [(f"{f}.{l}", f"{f}.{l}@example.com", uuid.uuid4().hex) for f, l in _PEO
 CONTENT = [uuid.uuid4().hex for _ in range(14)]
 # Content 0 is a runaway: three times the traffic of any other. Content 1 is a
 # heavy one: ordinary traffic, but every request is a very large prompt. That
-# gives the Top Spenders page one "high spend" and one "high cost per request"
+# gives the Profiles page one "high spend" and one "high peak context"
 # content outlier.
 CONTENT_W = [4.0, 1.0] + [1.0] * 12
 # Who owns each content item: spread across the heavy users.

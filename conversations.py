@@ -8,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 import theme
 from theme import apply, empty_fig
@@ -43,7 +44,7 @@ def higher_cost(
 # What the conversation spend chart can group by.
 CONV_BY = {
     "context": "Peak context", "model": "Model", "duration": "Duration", "turns": "Turns",
-    "pace": "Pace", "cache": "Cache hit", "tool": "Harness",
+    "pace": "Pace", "cache": "Caching", "tool": "Harness",
 }
 # The model view names this many models and folds the rest into "other".
 CONV_BY_MODELS = 7
@@ -207,60 +208,137 @@ def conv_groups(df: pd.DataFrame, key: pd.Series, order: list[str]) -> pd.DataFr
     return g.reindex(order, fill_value=0).rename_axis("label").reset_index()
 
 
-CONV_BY_AXIS = {
-    "model": "model the conversation spent most on",
-    "tool": "harness the conversation spent most through (from User-Agent)",
-    "duration": "first to last request",
-    "turns": "requests in the conversation",
-    "pace": "typical pause between requests (median)",
-    "cache": "input read from the prompt cache",
-    "context": "peak context: largest input in the conversation (tokens, cached included)",
-}
+# A group's donut number turns amber when its higher-cost share is at least this
+# far above the overall share: a few points either way is noise.
+DONUT_ABOVE = 0.05
 
 
-def conv_spend_fig(df: pd.DataFrame, by: str, mode: str, pct: float) -> go.Figure:
-    """Two bars per group: higher-cost conversations and the rest. Each bar is
-    plotted and labelled as its share of its own series' spend (so each series
-    sums to 100%, and bar heights match the labels); share of conversations sits under the group's name."""
+def conv_donuts_fig(df: pd.DataFrame, mode: str, pct: float) -> go.Figure:
+    """A row of small donuts for the categorical views (model, harness): one for
+    all conversations, then one per group, each split into normal and
+    higher-cost spend. The number inside is the higher-cost share, amber when it
+    is well above the overall one; under it, the group's share of all spend.
+    `df` is conv_groups' table. With nothing flagged (too few conversations)
+    every ring is one colour and the number is the group's share of spend."""
     total = float(df.spend.sum()) if len(df) else 0.0
     if not total:
         return empty_fig(mode, "No conversation spend in this view")
     t = theme.TOKENS[mode]
-    count = max(int(df.n.sum()), 1)
-    ticks = [f"{lab}<br><sub>{100 * n / count:.0f}% of convs</sub>"
-             for lab, n in zip(df.label.astype(str), df.n)]
+    flagged = bool(df.spend_hi.sum())
+    overall = float(df.spend_hi.sum()) / total
+    rows = [("all conversations", total, float(df.spend_lo.sum()), float(df.spend_hi.sum()),
+             int(df.n.sum()))]
+    rows += [(str(lab), float(s), float(lo), float(hi), int(k)) for lab, s, lo, hi, k in zip(
+        df.label, df.spend.tolist(), df.spend_lo.tolist(), df.spend_hi.tolist(), df.n.tolist())]
+    n = len(rows)
+    fig = make_subplots(rows=1, cols=n, specs=[[{"type": "domain"}] * n],
+                        subplot_titles=[lab if len(lab) <= 18 else lab[:17] + "\u2026"
+                                        for lab, *_ in rows])
+    names = ("normal", f"higher cost (above p{pct:g})")
+    for i, (lab, spend, lo, hi, convs) in enumerate(rows):
+        if not spend:
+            # Conversations, but none on a priced model: a grey ring, said so.
+            labels, values, colours = ["unpriced"], [1.0], [t["grid"]]
+            text = f"<b>unpriced</b><br><span style='font-size:12px'>{convs:,} convs</span>"
+        else:
+            labels, values = list(names), [lo, hi]
+            colours = [t["series"][0], theme.STATUS["warning"]]
+            share = hi / spend if flagged else spend / total
+            amber = flagged and i > 0 and share - overall >= DONUT_ABOVE
+            colour = theme.STATUS["warning"] if amber else t["ink"]
+            sub = "of all spend" if i == 0 else f"{spend / total:.0%} of spend"
+            if not flagged:
+                sub = f"{convs:,} convs"
+            text = (f"<b style='color:{colour}'>{share:.0%}</b><br>"
+                    f"<span style='font-size:12px'>{sub}</span>")
+        fig.add_pie(
+            labels=labels, values=values,
+            marker={"colors": colours, "line": {"color": t["surface"], "width": 2}},
+            hole=0.62, sort=False, direction="clockwise", textinfo="none",
+            showlegend=i == 0 and flagged, row=1, col=i + 1,
+            title={"text": text, "font": {"size": 17, "color": t["ink"]}},
+            customdata=[lab] * len(values),
+            hovertemplate=("%{customdata}<br>%{label}: <b>%{value:$,.2f}</b>"
+                           " \u00b7 %{percent}<extra></extra>") if spend else "%{customdata}: "
+                          "no estimated spend<extra></extra>",
+        )
+    fig.update_annotations(font={"size": 13, "color": t["ink2"]})
+    apply(fig, mode, height=250, showlegend=flagged, hover=True)
+    # The legend goes under the row: above it, it ran into the donut titles.
+    fig.update_layout(legend={"yanchor": "top", "y": -0.04, "x": 0},
+                      margin={"t": 30, "b": 40 if flagged else 8})
+    return fig
+
+
+# The numeric views the cumulative chart draws: how to read the measure from a
+# conversation, the axis type, the axis title and the hover format. Model and
+# harness have no order to draw a line along, so they keep the bars.
+CURVE_X = {
+    "context": (lambda d: d.peak_input, "log",
+                "peak context: largest input in the conversation (tokens, cached included)",
+                ",.0f"),
+    "duration": (lambda d: d.duration_min, "log", "first to last request (minutes)", ",.1f"),
+    "turns": (lambda d: d.calls, "log", "requests in the conversation", ",.0f"),
+    # A pause of 0 s has no place on a log axis; a tenth of a second reads the same.
+    "pace": (lambda d: d.med_idle.clip(lower=0.1), "log",
+             "typical pause between requests (seconds, median)", ",.1f"),
+    "cache": (lambda d: d.cache_hit * 100, "linear",
+              "input read from the prompt cache (%)", ".0f"),
+}
+
+
+def conv_cumulative_fig(df: pd.DataFrame, by: str, mode: str, pct: float) -> go.Figure:
+    """Cumulative spend along one measure, one line for the higher-cost
+    conversations and one for the rest. Each line is the share of its own
+    spend that sits in conversations at or below each value, so both run from
+    0 to 100%. Where a line climbs is where that spend sits; the further apart
+    the two lines, the more the measure separates the costly conversations
+    from the rest. `df` has one row per conversation: est, high and the
+    columns CURVE_X reads."""
+    get, axis_type, title, fmt = CURVE_X[by]
+    x = get(df) if len(df) else pd.Series(dtype=float)
+    est = df.est if len(df) else pd.Series(dtype=float)
+    ok = x.notna() & (est > 0)
+    if axis_type == "log":
+        ok &= x > 0
+    d = pd.DataFrame({"x": x[ok], "est": est[ok],
+                      "high": df.high[ok].astype(bool) if len(df) else []})
+    if d.empty:
+        return empty_fig(mode, "No conversation spend in this view")
+    t = theme.TOKENS[mode]
+    # With nothing flagged (too few conversations) there is one line, not two.
+    series = (
+        [(False, "normal", t["series"][0]),
+         (True, f"higher cost (above p{pct:g})", theme.STATUS["warning"])]
+        if d.high.any() else [(False, "all conversations", t["series"][0])]
+    )
     fig = go.Figure()
-    # Normal first, so it sits on the left of each pair.
-    for suffix, name, colour in (
-        ("lo", "normal", t["series"][0]),
-        ("hi", f"higher cost (above p{pct:g})", theme.STATUS["warning"]),
-    ):
-        spend, n = df[f"spend_{suffix}"], df[f"n_{suffix}"]
-        # Each series is a share of its own total, so normal sums to 100% and
-        # higher cost sums to 100%.
-        series_total = float(spend.sum())
-        share = spend / series_total * 100 if series_total else spend * 0.0
-        fig.add_bar(
-            x=ticks, y=share, name=name, marker={"color": colour},
-            # a sliver would only read "0%"; hover still has its figure
-            text=[f"{p:.0f}%" if p >= 0.5 else "" for p in share],
-            textposition="outside", textfont={"color": t["ink"], "size": 13},
-            customdata=[(k, s / k if k else 0, s) for s, k in zip(spend, n)],
+    for flag, name, colour in series:
+        part = d[d.high == flag]
+        if part.empty:
+            continue
+        g = part.groupby("x", sort=True).est.agg(["sum", "size"])
+        cum = (g["sum"].cumsum() / g["sum"].sum() * 100).to_numpy()
+        n = g["size"].cumsum().to_numpy()
+        # Start at 0% on the smallest value, so the first step shows as a rise.
+        fig.add_scatter(
+            x=np.r_[g.index[0], g.index], y=np.r_[0, cum], customdata=np.r_[0, n],
+            mode="lines", line_shape="hv", name=name,
+            line={"color": colour, "width": 2.5},
             hovertemplate=(
-                f"{name}: <b>%{{y:.1f}}%</b> of its spend"
-                "<br>%{customdata[2]:$,.2f} \u00b7 %{customdata[0]:,} conversations"
-                "<br>avg %{customdata[1]:$,.2f} each<extra></extra>"
+                f"{name}<br>at or below %{{x:{fmt}}}: <b>%{{y:.0f}}%</b> of its spend"
+                "<br>%{customdata:,.0f} conversations<extra></extra>"
             ),
         )
-    top = max(
-        (float(df[f"spend_{x}"].max()) / float(df[f"spend_{x}"].sum()) * 100
-         for x in ("lo", "hi") if df[f"spend_{x}"].sum()),
-        default=100.0,
-    )
-    fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.06)
-    fig.update_yaxes(title_text="share of the series' spend", ticksuffix="%",
-                     tickformat=".0f", range=[0, top * 1.18])
-    fig.update_xaxes(title_text=CONV_BY_AXIS[by])
+    # Half of each line's spend sits left of where it crosses this.
+    fig.add_hline(y=50, line={"color": t["axis"], "width": 1, "dash": "dot"})
+    fig.update_xaxes(type=axis_type, title_text=title)
+    # Ticks at powers of ten (1k, 10k, 100k), not the 2s and 5s between them,
+    # unless the data sits inside one decade, where that would leave no ticks.
+    if axis_type == "log" and d.x.max() / d.x.min() >= 10:
+        fig.update_xaxes(dtick=1, tickformat="~s")
+    fig.update_yaxes(title_text="share of spend at or below", ticksuffix="%",
+                     range=[0, 104])
     return apply(fig, mode, height=340, showlegend=True, hover=True)
 
 

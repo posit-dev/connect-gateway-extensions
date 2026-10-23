@@ -70,8 +70,30 @@ run server=env_var_or_default("CONNECT_SERVER", "") key=env_var_or_default("CONN
     @[ -n "{{server}}" ] && [ -n "{{key}}" ] || { echo "usage: just run <connect-url> <api-key>" >&2; exit 1; }
     @just port={{port}} _app "{{server}}" "{{key}}"
 
+# Includes copies an earlier run or test left behind; other checkouts' are left alone.
+# Stop every copy of the app and the mock Connect started from this checkout.
+stop:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    pids=()
+    for pid in $(pgrep -f 'shiny run app:app|demo/fake_connect\.py'); do
+        cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')
+        [ "$cwd" = "{{justfile_directory()}}" ] || continue
+        echo "stopping $pid: $(ps -o command= -p "$pid")"
+        pids+=("$pid")
+    done
+    [ ${#pids[@]} -gt 0 ] || exit 0
+    kill "${pids[@]}" 2>/dev/null
+    # Wait for them to let go of their ports before anything starts on them.
+    for _ in $(seq 20); do
+        kill -0 "${pids[@]}" 2>/dev/null || exit 0
+        sleep 0.25
+    done
+    kill -9 "${pids[@]}" 2>/dev/null || true
+
+# Runs `stop` first, so the ports are free.
 # Run the app against the mock Connect server, started here and stopped on exit.
-run-local:
+run-local: stop
     #!/usr/bin/env bash
     set -euo pipefail
     MOCK_CONNECT_PORT={{mock_port}} {{python}} demo/fake_connect.py &

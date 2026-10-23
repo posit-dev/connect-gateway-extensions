@@ -28,12 +28,10 @@ def test_ui_has_every_page_and_output(loaded):
         "model_time", "cache_savings_time", "cache_rate_time",
         "errors_time", "dl_adoption",
         "records_table", "records_title", "records_capped", "dl_records",
-        "attr_kind", "attr_kpis", "attr_bars", "attr_metric",
-        "attr_scatter", "attr_table", "dl_attr",
+        "pf_kind", "pf_pick", "pf_kpis", "dl_principal_spend",
     ):
         assert f'id="{output_id}"' in html
-    pages = ["Overview", "Top Spenders", "Profiles",
-             "Adoption", "Raw Data"]
+    pages = ["Overview", "Profiles", "Adoption", "Raw Data"]
     positions = [html.index(f'data-value="{p}"') for p in pages]
     assert positions == sorted(positions)
 
@@ -87,7 +85,7 @@ def test_shiny_run_serves_page_and_session(fake_connect, tmp_path):
 
         values, errors = asyncio.run(session())
         assert errors == {}
-        for output_id in ("topbar_status", "kpis", "attr_table",
+        for output_id in ("topbar_status", "kpis",
                           "pf_header", "adoption_kpis",
                           "records_table", "dl_records"):
             assert output_id in values

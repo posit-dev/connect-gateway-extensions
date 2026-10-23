@@ -11,7 +11,6 @@ import principals
 import theme
 import usage
 from filters import where
-from table_format import pretty_columns
 
 
 # ---- usage._catalog_prices ---------------------------------------------------
@@ -391,19 +390,30 @@ def test_conv_groups_of_no_conversations_still_make_a_table():
     table = conversations.conv_group_table(groups)
     assert table.empty
     assert "higher_cost_conversations" in table.columns
-    assert conversations.conv_spend_fig(groups, "model", "dark", 75).layout.annotations
+    assert conversations.conv_donuts_fig(groups, "dark", 75).layout.annotations
 
 
-# ---- table_format.pretty_columns --------------------------------------------------
-def test_pretty_columns_renames_known_and_spaces_the_rest():
-    df = pd.DataFrame(columns=["est_spend_usd", "peak_p75", "user"])
-    assert list(pretty_columns(df).columns) == ["estimated spend (usd)", "peak p75", "user"]
+# ---- principals.outliers ----------------------------------------------------------
+def _peers(spend: list[float]) -> pd.DataFrame:
+    n = len(spend)
+    return pd.DataFrame({"spend": spend, "conv_p75": [1.0] * n, "peak_p75": [100.0] * n})
 
 
-def test_pretty_columns_does_not_mutate_its_input():
-    df = pd.DataFrame({"est_spend_usd": [1]})
-    pretty_columns(df)
-    assert list(df.columns) == ["est_spend_usd"]
+def test_outliers_flag_the_top_5_percent():
+    why = principals.outliers(_peers(list(range(1, 41))))
+    # p95 of 1..40 is 38.05: the top two are flagged.
+    assert why.tolist() == [""] * 38 + ["high estimated spend"] * 2
+
+
+def test_outliers_ignore_a_flat_field():
+    why = principals.outliers(_peers([1.0] * 10))
+    assert (why == "").all()
+
+
+def test_outliers_need_enough_priced_peers():
+    # Seven with spend, and zero-spend rows do not count towards the eight.
+    why = principals.outliers(_peers([1, 1, 1, 1, 1, 1, 50, 0, 0]))
+    assert (why == "").all()
 
 
 # ---- filters.where: date edges ----------------------------------------------------

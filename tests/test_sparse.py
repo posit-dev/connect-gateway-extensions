@@ -78,7 +78,6 @@ def test_sessions_say_not_reported_rather_than_zero(sparse_app_server):
     value, note = tiles(reply, "kpis")["Sessions"]
     assert (value, note) == ("\u2013", "not reported by Workbench")
     assert not any("session" in p for p in pill_texts(reply))
-    assert tiles(reply, "attr_kpis")["Outlier sessions"][1] == "sessions not reported by Workbench"
 
 
 def test_content_average_is_content_spend_over_content_items(sparse_app_server):
