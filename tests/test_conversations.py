@@ -42,7 +42,7 @@ def test_compare_rows_lead_with_the_split_then_peak_context():
     df = _curve_frame([False] * 15 + [True] * 5)
     rows = conversations.conv_compare_rows(df)
     assert [r["label"] for r in rows] == [
-        "Conversations", "Spend", "Peak context", "Duration",
+        "Conversation Count", "Total Spend", "Peak context", "Duration",
         "Using the prompt cache", "With a cache miss"]
     assert rows[0]["high"] == "5 \u00b7 25%" and rows[0]["normal"] == "15 \u00b7 75%"
     # peak context is 10k-150k against 200k; the other measures are the same

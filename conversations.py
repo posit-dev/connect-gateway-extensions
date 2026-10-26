@@ -184,12 +184,12 @@ def conv_compare_rows(df: pd.DataFrame) -> list[dict]:
     hi = df.high.astype(bool)
     n_hi, n_lo = int(hi.sum()), int((~hi).sum())
     n = n_hi + n_lo
-    rows = [dict(section="Split of the total", label="Conversations", gap="", hint="",
+    rows = [dict(section="Split of the total", label="Conversation Count", gap="", hint="",
                  normal=f"{n_lo:,} \u00b7 {n_lo / n:.0%}", high=f"{n_hi:,} \u00b7 {n_hi / n:.0%}")]
     s_hi, s_lo = float(df.est[hi].sum()), float(df.est[~hi].sum())
     if s_hi + s_lo > 0:
         tot = s_hi + s_lo
-        rows.append(dict(section="Split of the total", label="Spend", gap="", hint="",
+        rows.append(dict(section="Split of the total", label="Total Spend", gap="", hint="",
                          normal=f"{fmt_usd(s_lo)} \u00b7 {s_lo / tot:.0%}",
                          high=f"{fmt_usd(s_hi)} \u00b7 {s_hi / tot:.0%}"))
     for label, get, unit, hint, share in COMPARE:
