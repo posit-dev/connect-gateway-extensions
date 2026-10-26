@@ -159,11 +159,11 @@ GROUP_MEMBERS: list[tuple[str, str, str]] = []
 
 _MODEL_DATE_REV = re.compile(r"(-\d{8})?(-v\d+(:\d+)?)?$")
 
-# The region (us., global., ...) and vendor (anthropic., openai., ...) prefixes
-# of a Bedrock model id: up to two leading segments of letters only. A model
-# name always has a digit or a hyphen, and it can have dots (openai.gpt-5.5),
-# so the match stops before it.
-_MODEL_PREFIX = re.compile(r"^(?:[a-z]+\.){0,2}")
+# The region (us., us-gov., global., ...) and vendor (anthropic., openai., ...)
+# prefixes of a Bedrock model id: up to two leading segments of words that
+# have only letters, joined by hyphens. A model name always has a digit, and it
+# can have dots (openai.gpt-5.5), so the match stops before it.
+_MODEL_PREFIX = re.compile(r"^(?:[a-z]+(?:-[a-z]+)*\.){0,2}")
 
 
 def _model_family(raw: str) -> str:
@@ -471,7 +471,7 @@ SELECT
     regexp_replace(
         regexp_replace(
             COALESCE(NULLIF(response_model, ''), request_model),
-            '^([a-z]+\\.){0,2}', ''),
+            '^([a-z]+(-[a-z]+)*\\.){0,2}', ''),
         '(-\\d{8})?(-v\\d+(:\\d+)?)?$', ''
     )                                                  AS model,
     -- The exact strings the call carried, kept for audit evidence.
