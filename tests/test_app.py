@@ -31,7 +31,7 @@ def test_ui_has_every_page_and_output(loaded):
         "pf_kind", "pf_pick", "pf_kpis",
     ):
         assert f'id="{output_id}"' in html
-    pages = ["Overview", "Profiles", "Adoption", "Raw Data"]
+    pages = ["Overview", "Attribution", "Adoption", "Raw Data"]
     positions = [html.index(f'data-value="{p}"') for p in pages]
     assert positions == sorted(positions)
 

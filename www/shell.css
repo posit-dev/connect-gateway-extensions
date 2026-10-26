@@ -64,7 +64,7 @@
 }
 .nav-ico { width: 14px; text-align: center; font-size: 0.8rem; opacity: 0.85; }
 
-/* Sub-tabs inside a page (Profiles). Scoped to .pf-tabs: Bootstrap's own
+/* Sub-tabs inside a page (Attribution). Scoped to .pf-tabs: Bootstrap's own
    `.nav-item` on the tab <li> must not pick up the rail's button styling. */
 .pf-tabs .nav {
   display: flex; flex-direction: row; flex-wrap: nowrap; gap: 4px;
@@ -142,7 +142,7 @@
 .page-header { margin: 14px 2px 18px; }
 .page-title { font-size: 1.45rem; font-weight: 700; margin: 0 0 2px; }
 .page-sub { color: var(--text-muted); font-size: 0.8rem; }
-/* a page-level switch under the title (e.g. Profiles: User / Content / Session / Group) */
+/* a page-level switch under the title (e.g. Attribution: User / Content / Session / Group) */
 .page-switch { display: flex; align-items: center; gap: 10px; margin: -6px 2px 16px; flex-wrap: wrap; }
 .page-switch-note { color: var(--text-muted); font-size: 0.74rem; margin-left: 8px; }
 .shell-body .card { margin-bottom: 1rem; }

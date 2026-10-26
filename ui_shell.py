@@ -112,7 +112,7 @@ def table_header(
 # The nav rail: section label, then the pages under it. A page's value is its
 # title (what `ui.nav_panel` uses when it is given no explicit value).
 NAV_SECTIONS = [
-    ("Gateway", ["Overview", "Adoption", "Profiles"]),
+    ("Gateway", ["Overview", "Adoption", "Attribution"]),
     ("Export", ["Raw Data"]),
 ]
 NAV_FIRST = NAV_SECTIONS[0][1][0]

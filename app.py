@@ -376,8 +376,8 @@ def server(input, output, session):
     # bookmark is restored, and the browser falls back to the first tab, so the
     # browser is told which tab to show instead.
     _LEGACY_TABS = {"Audit log": "Raw Data", "Models": "Overview",
-                    "Attribution": "Profiles", "Top Spenders": "Profiles",
-                    "Principals": "Profiles"}
+                    "Profiles": "Attribution", "Top Spenders": "Attribution",
+                    "Principals": "Attribution"}
 
     @session.bookmark.on_restored
     def _fix_stale_tab(state):

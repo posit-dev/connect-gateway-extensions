@@ -180,91 +180,6 @@ def test_list_pages_boolean_total_is_not_a_count():
 
 
 # ---- conversations ------------------------------------------------------------
-@pytest.mark.parametrize("s, text", [
-    (0, "0 s"), (40, "40 s"), (59.4, "59 s"),
-    (60, "1 min"), (720, "12 min"), (3599, "60 min"),
-    (3600, "1 h"), (9000, "2.5 h"),
-])
-def test_fmt_secs(s, text):
-    assert conversations.fmt_secs(s) == text
-
-
-@pytest.mark.parametrize("v, up", [
-    (2.33, 2.4), (2.4, 2.4), (140, 140), (141, 150), (0.0123, 0.013), (99, 99), (99.1, 100),
-])
-def test_up2_rounds_up_to_two_significant_figures(v, up):
-    assert conversations._up2(v) == pytest.approx(up)
-
-
-@pytest.mark.parametrize("v, kind, nice", [
-    (2.1, "int", 3), (3.0, "int", 3),
-    (0.401, "share", 0.41), (0.4, "share", 0.4),
-    (140, "secs", 150),          # 2.33 min -> 2.4 min = 144 s
-    (0, "secs", 0), (-5, "secs", 0),
-    (45, "secs", 45), (4000, "secs", 4320),
-])
-def test_nice(v, kind, nice):
-    expected = 144.0 if (v, kind) == (140, "secs") else nice
-    assert conversations._nice(v, kind) == pytest.approx(expected)
-
-
-def test_quantile_bands_cuts_at_p50_and_p90():
-    vals = pd.Series(range(1, 101), dtype=float)
-    bands, labels = conversations.quantile_bands(vals, "int")
-    assert len(labels) == 3 and labels[-1].endswith("+")
-    assert list(bands.cat.categories) == labels
-    counts = bands.value_counts().reindex(labels).tolist()
-    assert counts == [51, 40, 9]   # cuts round up: p50=50.5 -> 51, p90=90.1 -> 91
-    assert bands.iloc[0] == labels[0] and bands.iloc[-1] == labels[-1]
-
-
-def test_quantile_bands_low_tail_mirrors_the_cuts():
-    vals = pd.Series(range(1, 101), dtype=float)
-    low, _ = conversations.quantile_bands(vals, "int", "low")
-    counts = low.value_counts().reindex(low.cat.categories).tolist()
-    assert counts == [11, 40, 49]   # p10=10.9 -> 11; the narrow band is at the low end
-
-
-def test_quantile_bands_tiny_population_gets_one_band():
-    vals = pd.Series([1.0, 2.0, 3.0])
-    bands, labels = conversations.quantile_bands(vals, "int")
-    assert labels == ["1\u20133"]
-    assert bands.notna().all()
-
-
-def test_quantile_bands_constant_column_merges_to_one_band():
-    vals = pd.Series([1.0] * 50)
-    bands, labels = conversations.quantile_bands(vals, "int")
-    assert len(labels) == 1 and bands.nunique() == 1
-
-
-def test_quantile_bands_labels_are_unique_and_cover_every_value():
-    vals = pd.Series([1.0] * 60 + [2.0] * 30 + [50.0] * 10)
-    for kind in ("int", "share", "secs"):
-        v = vals / 100 if kind == "share" else vals
-        bands, labels = conversations.quantile_bands(v, kind)
-        assert len(set(labels)) == len(labels)
-        assert bands.notna().all()
-
-
-def test_band_labels_int_secs_and_share():
-    vals = pd.Series([1, 2, 3, 10, 20, 30])
-    inf = float("inf")
-    say = lambda v: f"{v:,.0f}"  # noqa: E731
-    assert conversations._band_labels(vals, [-inf, 3, 10, inf], "int", say) == ["1\u20133", "4\u201310", "11+"]
-    assert conversations._band_labels(vals, [-inf, 3, inf], "int", say) == ["1\u20133", "4+"]
-    assert conversations._band_labels(pd.Series([2, 2]), [-inf, inf], "int", say) == ["2"]
-    pct = lambda v: f"{100 * v:.0f}%"  # noqa: E731
-    share = pd.Series([0.1, 0.5, 0.9])
-    assert conversations._band_labels(share, [-inf, 0.4, 0.8, inf], "share", pct) == [
-        "\u2264 40%", "40\u201380%", "> 80%"]
-    secs = pd.Series([10.0, 200.0, 5000.0])
-    assert conversations._band_labels(secs, [-inf, 120, 600, inf], "secs", conversations.fmt_secs) == [
-        "\u2264 2 min", "2\u201310 min", "> 10 min"]
-    assert conversations._band_labels(share, [-inf, inf], "share", pct) == ["all"]
-    assert conversations._band_labels(pd.Series([0.0, 0.0]), [-inf, 0, inf], "share", pct)[0] == "0%"
-
-
 def test_higher_cost_needs_a_baseline_and_flags_above_the_percentile():
     est = pd.Series([1.0] * 99 + [100.0])
     out = conversations.higher_cost(est)
@@ -383,14 +298,12 @@ def test_empty_fig_wraps_a_long_reason():
 
 
 # ---- conversations with nothing in view -------------------------------------------
-def test_conv_groups_of_no_conversations_still_make_a_table():
-    """A principal with no conversations in view (one day, say) crashed the table."""
+def test_conv_groups_of_no_conversations_still_make_a_chart():
+    """A principal with no conversations in view (one day, say) crashed the chart."""
     empty = pd.DataFrame(columns=["est", "high"])
     groups = conversations.conv_groups(empty, pd.Series(dtype=object), [])
-    table = conversations.conv_group_table(groups)
-    assert table.empty
-    assert "higher_cost_conversations" in table.columns
-    assert conversations.conv_donuts_fig(groups, "dark", 75).layout.annotations
+    assert groups.empty
+    assert conversations.conv_bars_fig(groups, "dark", 75).layout.annotations
 
 
 # ---- principals.outliers ----------------------------------------------------------

@@ -106,7 +106,7 @@ def test_harness_charts_keep_requests_with_no_user_agent(sparse_app_server):
 
 def test_principals_explain_a_kind_with_nobody_in_it(sparse_app_server):
     async def scenario(session: Session, first: Reply, html: str):
-        return await session.update(main_tabs="Profiles", pf_kind="session")
+        return await session.update(main_tabs="Attribution", pf_kind="session")
 
     reply = visit(sparse_app_server, scenario)
     assert reply.errors == {}
