@@ -180,8 +180,7 @@ def test_csv_downloads_are_registered_and_streamed(app_server):
 
     reply, files = visit(app_server, scenario)
     assert sorted(k for k in reply.values if k.startswith("dl_")) == [
-        "dl_adoption", "dl_pf_conv_groups",
-        "dl_pf_records", "dl_pf_rel_0", "dl_pf_rel_1", "dl_records",
+        "dl_adoption", "dl_pf_records", "dl_pf_rel_0", "dl_pf_rel_1", "dl_records",
     ]
     for name, body in files.items():
         rows = csv_rows(body)

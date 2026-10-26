@@ -308,25 +308,22 @@ def test_conv_groups_of_no_conversations_still_make_a_chart():
 
 # ---- principals.outliers ----------------------------------------------------------
 def _peers(spend: list[float]) -> pd.DataFrame:
-    n = len(spend)
-    return pd.DataFrame({"spend": spend, "conv_p75": [1.0] * n, "peak_p75": [100.0] * n})
+    return pd.DataFrame({"spend": spend})
 
 
 def test_outliers_flag_the_top_5_percent():
-    why = principals.outliers(_peers(list(range(1, 41))))
+    flagged = principals.outliers(_peers(list(range(1, 41))))
     # p95 of 1..40 is 38.05: the top two are flagged.
-    assert why.tolist() == [""] * 38 + ["high estimated spend"] * 2
+    assert flagged.tolist() == [False] * 38 + [True] * 2
 
 
 def test_outliers_ignore_a_flat_field():
-    why = principals.outliers(_peers([1.0] * 10))
-    assert (why == "").all()
+    assert not principals.outliers(_peers([1.0] * 10)).any()
 
 
 def test_outliers_need_enough_priced_peers():
     # Seven with spend, and zero-spend rows do not count towards the eight.
-    why = principals.outliers(_peers([1, 1, 1, 1, 1, 1, 50, 0, 0]))
-    assert (why == "").all()
+    assert not principals.outliers(_peers([1, 1, 1, 1, 1, 1, 50, 0, 0])).any()
 
 
 # ---- filters.where: date edges ----------------------------------------------------

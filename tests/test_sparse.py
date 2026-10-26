@@ -110,6 +110,6 @@ def test_principals_explain_a_kind_with_nobody_in_it(sparse_app_server):
 
     reply = visit(sparse_app_server, scenario)
     assert reply.errors == {}
-    assert "No sessions in this view" in reply.values["pf_header"]["html"]
-    assert "workbench-session-id" in reply.values["pf_header"]["html"]
+    assert "No sessions in this view" in reply.values["pf_table"]["html"]
+    assert "workbench-session-id" in reply.values["pf_table"]["html"]
 
