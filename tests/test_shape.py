@@ -29,6 +29,9 @@ MODELS = [
     # A Bedrock base id has a provider prefix but no region.
     ("anthropic.claude-3-haiku-20240307-v1:0", "", "claude-3-haiku", None),
     ("gpt-5", "gpt-5", "gpt-5", None),
+    # A Mantle id can have dots in the model name.
+    ("openai.gpt-5.5", "", "gpt-5.5", None),
+    ("xai.grok-4.3", "", "grok-4.3", None),
 ]
 
 
