@@ -255,13 +255,7 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
   text-overflow: ellipsis;
 }
 .tile-note { color: var(--text-muted); font-size: 0.78rem; min-height: 1em; }
-/* Where a principal stands against its peers (principals.versus_peers): a
-   tinted badge loud enough to read next to the figure, then an outlier tag
-   when it is in the top 5%. */
-.versus-row {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
-  margin: 4px 0 6px;
-}
+/* The outlier tag in the peer table (principals.peer_table). */
 .versus {
   display: inline-block;
   padding: 3px 10px;
@@ -271,22 +265,6 @@ a.action-button:not(.btn):hover { color: var(--accent); text-decoration: underli
   font-weight: 600;
   line-height: 1.3;
   white-space: nowrap;
-}
-.versus-below {
-  color: var(--good-text);
-  background: color-mix(in srgb, var(--good-text) 16%, transparent);
-  border-color: color-mix(in srgb, var(--good-text) 50%, transparent);
-}
-.versus-above {
-  color: #9a6b00;
-  background: color-mix(in srgb, #e0a72c 20%, transparent);
-  border-color: color-mix(in srgb, #e0a72c 60%, transparent);
-}
-[data-bs-theme="dark"] .versus-above { color: #f2bd4a; }
-.versus-even {
-  color: var(--text-primary);
-  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
-  border-color: color-mix(in srgb, var(--text-muted) 45%, transparent);
 }
 .versus-outlier {
   color: #c0413b;
@@ -446,49 +424,19 @@ body .card-body shiny-data-frame .shiny-data-grid {
   padding: 8px 2px 2px;
 }
 
-/* Profiles: the box under the Conversations tab (principals.conv_summary): the
-   count on the left, then two bars splitting conversations and spend into the
-   higher-cost and normal camps, with a key under them. Styled as a stat tile. */
-.conv-summary {
-  display: flex; flex-wrap: wrap; gap: 14px 32px; align-items: center;
-  margin: 0 0 16px; padding: 16px 20px;
-  background: var(--surface-1);
-  border: 1px solid var(--hairline);
-  border-top: 2px solid var(--card-accent);
-  border-radius: var(--radius);
-  color: var(--text-muted); font-size: 0.85rem;
-}
-.conv-summary-count { min-width: 150px; }
-.conv-summary-num {
-  color: var(--text-primary); font-size: 1.85rem; font-weight: 600; line-height: 1.2;
-}
-.conv-summary-label,
-.conv-split-label {
-  font-family: var(--font-mono); font-size: 0.68rem;
-  letter-spacing: 0.08em; text-transform: uppercase;
-}
-.conv-summary-sub { margin-top: 4px; }
-.conv-summary-splits {
-  flex: 0 1 640px; display: flex; flex-direction: column; gap: 6px;
-}
-.conv-split-row { display: flex; align-items: center; gap: 12px; }
-.conv-split-label { width: 110px; flex: none; text-align: right; }
-.conv-split-bar {
-  flex: 1; display: flex; height: 20px; border-radius: 4px; overflow: hidden;
-  background: var(--hairline);
-}
-.conv-split-seg {
-  display: flex; align-items: center; padding: 0 10px; min-width: 2px;
-  font-size: 0.75rem; font-weight: 600; white-space: nowrap; overflow: hidden;
-  font-variant-numeric: tabular-nums;
-}
-.conv-split-hi { color: #2b1d00; }
-.conv-split-lo { color: #ffffff; justify-content: flex-end; }
-.conv-split-seg + .conv-split-seg { border-left: 2px solid var(--surface-1); }
-.conv-summary-keys {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px;
-  padding-left: 122px; margin-top: 2px;
-}
-.conv-summary-key { display: inline-flex; align-items: center; gap: 2px; }
-.conv-summary-how { flex-basis: 100%; }
+/* The Compare view (principals.conv_compare): higher cost and normal side by side. */
+.cmp-note { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 12px; }
+.cmp-table { width: 100%; border-collapse: collapse; font-size: 0.9rem;
+  font-variant-numeric: tabular-nums; }
+.cmp-table th, .cmp-table td { padding: 8px 12px; text-align: right; vertical-align: top; }
+.cmp-table th:first-child, .cmp-table td:first-child { text-align: left; }
+.cmp-table thead th { color: var(--text-muted); font-weight: 500; font-size: 0.8rem;
+  border-bottom: 1px solid var(--hairline); }
+.cmp-table tr.cmp-section th { text-align: left; padding-top: 18px; font-family: var(--font-mono);
+  font-size: 0.68rem; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-muted); border-bottom: 1px solid var(--hairline); }
+.cmp-table td { color: var(--text-primary); border-bottom: 1px solid var(--hairline); }
+.cmp-table td.cmp-label { color: var(--text-primary); }
+.cmp-table td.cmp-gap { font-weight: 600; white-space: nowrap; }
+.cmp-table td.cmp-hint { text-align: left; color: var(--text-muted); font-size: 0.8rem; max-width: 380px; }
 

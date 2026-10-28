@@ -64,7 +64,7 @@
 }
 .nav-ico { width: 14px; text-align: center; font-size: 0.8rem; opacity: 0.85; }
 
-/* Sub-tabs inside a page (Profiles). Scoped to .pf-tabs: Bootstrap's own
+/* Sub-tabs inside a page (Attribution). Scoped to .pf-tabs: Bootstrap's own
    `.nav-item` on the tab <li> must not pick up the rail's button styling. */
 .pf-tabs .nav {
   display: flex; flex-direction: row; flex-wrap: nowrap; gap: 4px;
@@ -142,7 +142,7 @@
 .page-header { margin: 14px 2px 18px; }
 .page-title { font-size: 1.45rem; font-weight: 700; margin: 0 0 2px; }
 .page-sub { color: var(--text-muted); font-size: 0.8rem; }
-/* a page-level switch under the title (e.g. Profiles: User / Content / Session / Group) */
+/* a page-level switch under the title (e.g. Attribution: User / Content / Session / Group) */
 .page-switch { display: flex; align-items: center; gap: 10px; margin: -6px 2px 16px; flex-wrap: wrap; }
 .page-switch-note { color: var(--text-muted); font-size: 0.74rem; margin-left: 8px; }
 .shell-body .card { margin-bottom: 1rem; }
@@ -243,23 +243,40 @@ body.drawer-open .filter-drawer {
 }
 
 /* ---- principals drill-down (prototype) ------------------------------------- */
-.pf-pick { min-width: 340px; }
-.pf-pick .form-group, .pf-pick .shiny-input-container { margin-bottom: 0; width: 100%; }
-.pf-head {
-  background: var(--surface-1); border: 1px solid var(--hairline-strong);
-  border-radius: 8px; padding: 14px 18px; margin-bottom: 14px;
+/* The heading over the sub-tabs: whose details they are. */
+/* The details box: the picked principal's name over its sub-tabs (.pf-tabs). */
+.pf-tabs {
+  margin-top: 22px; padding: 16px 18px 4px;
+  border: 1px solid var(--hairline-strong); border-top: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 4%, var(--page));
 }
+.pf-tabs .nav { margin-top: 10px; }
+.pf-head { display: flex; align-items: baseline; gap: 12px; }
 .pf-title { font-size: 1.25rem; font-weight: 600; color: var(--text-primary); }
-.pf-sub { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-secondary); margin-bottom: 10px; }
-.pf-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; font-size: 0.85rem; }
-.pf-facts dt { font-weight: 500; color: var(--text-secondary); }
-.pf-facts dd { margin: 0; color: var(--text-primary); }
-.pf-chip {
-  display: inline-block; margin: 0 6px 2px 0; padding: 1px 8px; border-radius: 999px;
-  font-family: var(--font-mono); font-size: 0.74rem;
-  background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-border);
-}
 .pf-note { color: var(--text-secondary); font-size: 0.82rem; margin-bottom: 6px; }
+.pf-eyebrow {
+  font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--accent);
+}
+
+/* The peer table: every principal of a kind, and the picker for the profile. */
+.peer-card { margin-bottom: 14px; }
+.pt-scroll { max-height: 360px; overflow-y: auto; }
+.peer-table thead th { position: sticky; top: 0; background: var(--surface-1); z-index: 1; }
+.peer-table th.sortable { cursor: pointer; white-space: nowrap; user-select: none; }
+.peer-table th.sortable:hover, .peer-table th.sorted { color: var(--text-primary); }
+.peer-table td { vertical-align: middle; white-space: nowrap; }
+.peer-table .pt-row { cursor: pointer; }
+.peer-table .pt-row:hover td { background: var(--surface-2); }
+.peer-table .pt-sel td { background: var(--accent-soft); }
+.peer-table .pt-sel td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.peer-table .pt-name { margin-right: 8px; }
+.peer-table .versus { font-size: 0.7rem; padding: 0 6px; }
+.peer-table .pt-spend { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.pt-track { width: 70px; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden;
+  display: inline-flex; }
+.pt-bar { height: 100%; background: var(--accent); border-radius: 3px; }
 
 
 /* Shown over the page until the server has drawn the first views. */

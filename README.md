@@ -133,7 +133,7 @@ Each page lives in its own module and exposes `panel()`, its `nav_panel`, and
 `server(input, ctx)`:
 
 - `pages/overview.py`, `pages/adoption.py` and `pages/raw_data.py`.
-- `principals.py` is the Profiles page. It takes Raw Data's SQL builder, and
+- `principals.py` is the Attribution page. It takes Raw Data's SQL builder, and
   flags the outliers among each kind (`outliers`).
 
 `pages/context.py` defines `PageContext`, the explicit set of shared services a
@@ -149,7 +149,7 @@ The helper modules hold no Shiny session state:
 - `filters.py` turns the filter dict into a SQL `WHERE` clause and quotes
   values. It also holds `TOKEN_COUNT`, the SQL for a row's token count.
 - `conversations.py` groups requests into conversations from data frames,
-  and holds the higher-cost flag (`HIGH_PCT`, `higher_cost`) that Profiles
+  and holds the higher-cost flag (`HIGH_PCT`, `higher_cost`) that Attribution
   uses.
 - `ui_shell.py` holds the navigation rail, the filter drawer and shared page
   components.

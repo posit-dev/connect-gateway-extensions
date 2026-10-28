@@ -28,10 +28,10 @@ def test_ui_has_every_page_and_output(loaded):
         "model_time", "cache_savings_time", "cache_rate_time",
         "errors_time", "dl_adoption",
         "records_table", "records_title", "records_capped", "dl_records",
-        "pf_kind", "pf_pick", "pf_kpis",
+        "pf_kind", "pf_pick", "pf_table",
     ):
         assert f'id="{output_id}"' in html
-    pages = ["Overview", "Profiles", "Adoption", "Raw Data"]
+    pages = ["Overview", "Attribution", "Adoption", "Raw Data"]
     positions = [html.index(f'data-value="{p}"') for p in pages]
     assert positions == sorted(positions)
 

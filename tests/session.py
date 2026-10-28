@@ -179,7 +179,7 @@ def browser_inputs(html: str) -> dict[str, object]:
     active = re.search(
         r'data-value="([^"]+)"[^>]*class="nav-link active"[^>]*href="#tab-main_tabs-', html)
     inputs["main_tabs"] = active.group(1) if active else "Overview"
-    # The Profiles picker starts empty and the server fills it; a browser
+    # The Attribution picker starts empty and the server fills it; a browser
     # reports the empty value, and without it the choices never load.
     inputs["pf_pick"] = ""
     return inputs

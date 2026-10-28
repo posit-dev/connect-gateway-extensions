@@ -1,4 +1,4 @@
-"""Profiles: pick one user, content item, Workbench session or Connect group,
+"""Attribution: pick one user, content item, Workbench session or Connect group,
 and drill into it.
 
 A prototype, built to find out which of these views are worth keeping. Every
@@ -9,9 +9,8 @@ little about whether it is unusual.
 The SQL and chart builders are plain functions of a WHERE clause, so they can be
 exercised without a browser; `server()` is only the glue to Shiny.
 
-Each principal is measured on spend, conversation cost and peak context. The
-ones in the top 5% of their kind on any of the three are outliers: listed first
-in the picker and tagged on the tiles.
+The ones in the top 5% of their kind by spend are outliers: listed first in the
+table and tagged.
 
 Groups come from the Connect groups API (see usage._fetch_groups). A user can be
 in several groups, so group totals overlap: the same request counts towards every
@@ -21,7 +20,6 @@ group its user is in, and group spend does not add up to the whole.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -34,7 +32,7 @@ import usage
 from conversations import HIGH_PCT, MIN_BASELINE, higher_cost
 from filters import TOKEN_COUNT, dim_sql
 from pages.context import PageContext
-from theme import apply, card_num, card_usd, empty_fig, fmt_usd, render_widget
+from theme import apply, empty_fig, fmt_usd, render_widget
 from ui_shell import empty_note, export_button, help_icon, page_header, table_header
 
 KINDS = {"user": "User", "content": "Content", "session": "Session", "group": "Group"}
@@ -69,21 +67,15 @@ def short(s, n: int = 8) -> str:
 
 
 # ---- data -----------------------------------------------------------------------
-# What a principal can stand out on, and how the header and charts say so.
-OUTLIER_MEASURES = [
-    ("spend", "high estimated spend"),
-    ("conv_p75", "high conversation cost"),
-    ("peak_p75", "high peak context"),
-]
-# A principal at or above this percentile of its kind, on a measure, is an outlier.
+# A principal at or above this percentile of its kind, by spend, is an outlier.
 OUTLIER_PCT = 95
 # With fewer peers than this a percentile means little, so nobody is flagged.
 OUTLIER_MIN_N = 8
 
 
 def peers_df(kind: str, w: str, cost: str) -> pd.DataFrame:
-    """Every principal of a kind in view, ranked by spend, with the measures
-    the KPI tiles and outlier flags judge."""
+    """Every principal of a kind in view, ranked by spend, with the model each
+    spent most on and whether it is an outlier."""
     src, key = kind_source(kind)
     has_key = f"{key} IS NOT NULL AND CAST({key} AS VARCHAR) <> ''"
     extra = ", MAX(group_name) AS gname" if kind == "group" else ""
@@ -94,49 +86,33 @@ def peers_df(kind: str, w: str, cost: str) -> pd.DataFrame:
         FROM {src}
         WHERE {w} AND {has_key}
         GROUP BY 1""")
-    # Conversation cost and peak context (the largest input of a conversation):
-    # a percentile of each across the principal's conversations.
-    peaks = usage.q(f"""
-        SELECT k, quantile_cont(est, {HIGH_PCT / 100}) AS conv_p75,
-               quantile_cont(peak, {HIGH_PCT / 100}) AS peak_p75
-        FROM (SELECT {key} AS k, SUM({cost}) AS est, MAX(input_tokens) AS peak FROM {src}
-              WHERE {w} AND {has_key} AND conversation_id IS NOT NULL
-              GROUP BY {key}, conversation_id)
+    models = usage.q(f"""
+        SELECT k, arg_max(model, v) AS top_model
+        FROM (SELECT {key} AS k, model, COALESCE(SUM({cost}), 0) AS v
+              FROM {src} WHERE {w} AND {has_key} GROUP BY 1, 2)
         GROUP BY k""")
-    df = df.merge(peaks, on="k", how="left")
+    df = df.merge(models, on="k", how="left")
     df = df.sort_values("spend", ascending=False, ignore_index=True)
     df["label"] = [peer_label(kind, r) for r in df.itertuples()]
     # Two sessions can share a name, and a chart draws two bars with one label
     # as one.
     dup = df.label.duplicated(keep=False)
     df.loc[dup, "label"] = [f"{lab} ({short(k, 6)})" for lab, k in zip(df.label[dup], df.k[dup])]
-    df["why"] = outliers(df)
+    df["outlier"] = outliers(df)
     return df
 
 
 def outliers(df: pd.DataFrame) -> pd.Series:
-    """Why each principal stands out from its peers, or "" when it does not.
+    """Whether each principal's spend stands out from its peers.
 
-    A principal is flagged on a measure when it is at or above the OUTLIER_PCT
+    A principal is an outlier when its spend is at or above the OUTLIER_PCT
     percentile of its kind, and above the median (so a tie at the top of a flat
-    field is not an outlier). Each measure compares only the principals with a
-    value above zero for it.
+    field is not an outlier). Only principals with some spend are compared.
     """
-    why: dict = {i: [] for i in df.index}
-    for col, label in OUTLIER_MEASURES:
-        vals = peer_values(df, col)
-        if len(vals) < OUTLIER_MIN_N:
-            continue
-        high = (vals >= vals.quantile(OUTLIER_PCT / 100)) & (vals > vals.median())
-        for i in vals.index[high.to_numpy()]:
-            why[i].append(label)
-    return pd.Series([" + ".join(why[i]) for i in df.index], index=df.index, dtype=object)
-
-
-def peer_values(peers: pd.DataFrame, col: str) -> pd.Series:
-    """The values of one measure that peers are compared on: those above zero."""
-    vals = peers[col].dropna()
-    return vals[vals > 0]
+    vals = df.spend[df.spend > 0]
+    if len(vals) < OUTLIER_MIN_N:
+        return pd.Series(False, index=df.index)
+    return (df.spend >= vals.quantile(OUTLIER_PCT / 100)) & (df.spend > vals.median())
 
 
 def peer_label(kind: str, r) -> str:
@@ -150,50 +126,6 @@ def peer_label(kind: str, r) -> str:
     return str(r.gname)
 
 
-def identity(kind: str, key: str, w: str, cost: str) -> dict:
-    """What the header says about one principal."""
-    p = pred(kind, key)
-    out: dict = {}
-    if kind == "user":
-        r = usage.q(f"""SELECT MAX(user_email) email, string_agg(DISTINCT team, ', ') teams
-                        FROM gateway_events WHERE {p}""").iloc[0]
-        out["email"] = r.email
-        out["teams"] = r.teams
-        out["groups"] = usage.q(f"""
-            SELECT DISTINCT group_name FROM user_groups WHERE user_guid IN
-              (SELECT DISTINCT user_guid FROM gateway_events WHERE {p})
-            ORDER BY 1""").group_name.tolist()
-    elif kind == "content":
-        r = usage.q(f"""
-            SELECT MAX(content_owner_username) AS owner,
-                   string_agg(DISTINCT integration_auth_type, ', ') AS auth,
-                   COUNT(DISTINCT viewer_username) AS viewers,
-                   COUNT(DISTINCT job_key) AS jobs,
-                   COUNT(DISTINCT username) AS charged
-            FROM gateway_events WHERE {w} AND {p}""").iloc[0]
-        out.update(r.to_dict())
-        out["title"] = usage.content_name(key)
-    elif kind == "session":
-        r = usage.q(f"""
-            SELECT MAX(workbench_session_name) AS name, MAX(username) AS owner,
-                   MAX(team) AS team, MAX(workbench_project_name) AS project,
-                   MAX(workbench_project_path) AS path, MIN(ts) AS first, MAX(ts) AS last
-            FROM gateway_events WHERE {p}""").iloc[0]
-        out.update(r.to_dict())
-    else:
-        r = usage.q(f"""
-            SELECT MAX(group_name) AS name, COUNT(DISTINCT user_guid) AS members
-            FROM user_groups WHERE group_guid = {sq(key)}""").iloc[0]
-        out.update(r.to_dict())
-        out["active"] = int(usage.scalar(
-            f"SELECT COUNT(DISTINCT user_guid) FROM gateway_events WHERE {w} AND {p}") or 0)
-        out["multi"] = int(usage.scalar(f"""
-            SELECT COUNT(*) FROM (SELECT user_guid FROM user_groups
-              WHERE user_guid IN (SELECT user_guid FROM user_groups WHERE group_guid = {sq(key)})
-              GROUP BY 1 HAVING COUNT(DISTINCT group_guid) > 1)""") or 0)
-    return out
-
-
 def daily(w: str, p: str, cost: str, grain: str = "day") -> pd.DataFrame:
     """This principal's spend per day, week or month."""
     return usage.q(f"""SELECT date_trunc('{grain}', day)::DATE AS day, SUM({cost}) v
@@ -205,7 +137,7 @@ def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
     p = pred(kind, key)
     if kind == "user":
         content = usage.q(f"""
-            SELECT content_guid, string_agg(DISTINCT user_kind, ', ') AS via,
+            SELECT content_guid, string_agg(DISTINCT user_kind, ', ' ORDER BY user_kind) AS via,
                    COUNT(*) requests, SUM({cost}) est_spend_usd
             FROM gateway_events WHERE {w} AND {p} AND content_guid IS NOT NULL
             GROUP BY 1 ORDER BY est_spend_usd DESC""")
@@ -219,8 +151,8 @@ def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
             GROUP BY 2 ORDER BY est_spend_usd DESC""")
         return [
             dict(title="Content", df=content, label="content",
-                 note="How they reached it: as a viewer, or as the owner of content "
-                      "running on its own credentials.",
+                 note="How they reached it: as a viewer, as the owner of content running "
+                      "on its own credentials, or direct, with their own credentials.",
                  empty="No Connect content used in this view: all of this user's "
                        "requests came from outside content."),
             dict(title="Sessions", df=sessions, label="session", note="",
@@ -230,7 +162,7 @@ def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
         ]
     if kind == "content":
         users = usage.q(f"""
-            SELECT username AS user, string_agg(DISTINCT user_kind, ', ') AS via,
+            SELECT username AS user, string_agg(DISTINCT user_kind, ', ' ORDER BY user_kind) AS via,
                    COUNT(*) requests, SUM({cost}) est_spend_usd
             FROM gateway_events WHERE {w} AND {p} GROUP BY 1 ORDER BY est_spend_usd DESC""")
         top = users.est_spend_usd.iloc[0] / users.est_spend_usd.sum() if users.est_spend_usd.sum() else 0
@@ -298,23 +230,28 @@ def conversations(w: str, p: str, cost: str) -> pd.DataFrame:
     df = usage.q(f"""
         WITH ev AS (
             SELECT *, {cost} AS cost,
-                   -- from the end of the previous request: when the cache was last touched
-                   (epoch_ms(ts) - LAG(epoch_ms(ts) + COALESCE(duration_ms, 0))
-                        OVER (PARTITION BY conversation_id ORDER BY ts, response_id)) / 1000.0
-                       AS idle_s
+                   LAG(input_tokens) OVER (PARTITION BY conversation_id
+                                           ORDER BY ts, response_id) AS prev_input,
+                   MAX(cache_read_tokens) OVER (PARTITION BY conversation_id) AS cache_used
             FROM gateway_events
             WHERE {w} AND {p} AND conversation_id IS NOT NULL)
         SELECT conversation_id AS conversation, MIN(ts) AS started,
                date_diff('second', MIN(ts), MAX(ts)) / 60.0 AS minutes,
                COUNT(*) AS turns, SUM(cost) AS est,
                MAX(input_tokens) AS peak_context,
-               SUM(input_tokens - cache_read_tokens) AS cache_miss_tokens,
+               SUM(cache_read_tokens + cache_creation_tokens) > 0 AS uses_cache,
+               -- A cache miss: a request that read back under half of what the
+               -- one before it sent, in a conversation that uses the cache at
+               -- all. The tokens are what had to be read again. Below 1024
+               -- tokens nothing is cached, so a short prompt is no miss.
+               SUM(CASE WHEN prev_input >= 1024 AND cache_used > 0
+                             AND cache_read_tokens < 0.5 * prev_input
+                        THEN prev_input - cache_read_tokens ELSE 0 END) AS miss_tokens,
                SUM(CASE WHEN status_code <> 200 THEN 1 ELSE 0 END) AS errors,
                SUM(CASE WHEN finish_reason = 'tool_use' THEN 1 ELSE 0 END) AS tool_calls,
                mode(model) AS model,
                arg_max(model, cost) FILTER (WHERE model <> '') AS main_model,
                arg_max(tool, cost) FILTER (WHERE tool IS NOT NULL) AS main_tool,
-               median(idle_s) AS med_idle,
                MAX(username) AS who, MAX(content_guid) AS content
         FROM ev
         GROUP BY 1 ORDER BY est DESC""")
@@ -322,61 +259,6 @@ def conversations(w: str, p: str, cost: str) -> pd.DataFrame:
     # is relative to the principal itself, not to the whole server.
     df[["high", "line"]] = higher_cost(df.est)
     return df
-
-
-# Within this fraction of the typical peer, a principal reads as "in line" rather
-# than above or below: a few percent either way is noise, not a habit.
-VERSUS_EVEN = 0.05
-
-
-def versus_peers(e: SimpleNamespace, col: str, enough: bool = True) -> ui.Tag | None:
-    """A badge saying where this principal's figure for one measure sits against
-    the typical (median) peer, and an outlier tag when the principal is in the
-    top 5% of its kind on it. Lower is better for every measure (spend, cost,
-    context), so below is green and above is amber. With `enough` false the
-    principal's own figure is too thin to compare, so only the tag is shown.
-    The figures behind them are in the tile's help (`typical_help`)."""
-    vals = peer_values(e.peers, col)
-    if vals.empty:
-        return None
-    org, r = float(vals.median()), e.peers.iloc[e.rank - 1]
-    mine = r[col]
-    flag = dict(OUTLIER_MEASURES)[col] in r.why.split(" + ")
-    tag = ui.span("outlier", class_="versus versus-outlier") if flag else None
-    if not enough or pd.isna(mine):
-        return ui.div(tag, class_="versus-row") if tag else None
-    d = mine / org - 1 if org else 0.0
-    if abs(d) < VERSUS_EVEN:
-        cls, text = "even", "\u2248 typical"
-    elif d < 0:
-        cls, text = "below", f"\u25bc {-d:.0%} below typical"
-    else:
-        cls, text = "above", f"\u25b2 {d:.0%} above typical"
-    return ui.div(ui.span(text, class_=f"versus versus-{cls}"), tag, class_="versus-row")
-
-
-def typical_help(e: SimpleNamespace, col: str, say, about: str, *extra) -> ui.Tag:
-    """The help beside a KPI tile: what the measure is, the typical peer it is
-    compared with, and where the outlier line sits."""
-    vals = peer_values(e.peers, col)
-    body: list = [ui.p(about)]
-    if not vals.empty:
-        body.append(ui.p(
-            ui.strong(f"Typical {e.noun}: {say(float(vals.median()))}"),
-            f", the median of the {len(vals):,} {e.noun}s in view. The badge says how "
-            f"far this {e.noun} is above or below it."))
-    if len(vals) >= OUTLIER_MIN_N:
-        line = say(float(vals.quantile(OUTLIER_PCT / 100)))
-        body.append(ui.p(
-            ui.strong("Outlier"),
-            f" marks the top {100 - OUTLIER_PCT}% of {e.noun}s: {line} or more."))
-    else:
-        body.append(ui.p(
-            f"With fewer than {OUTLIER_MIN_N} {e.noun}s to compare, nobody is "
-            "marked an outlier."))
-    body.extend(ui.p(x) for x in extra if x)
-    body[-1] = ui.p(*body[-1].children, class_="mb-0")
-    return help_icon(*body)
 
 
 # ---- figures ------------------------------------------------------------------------
@@ -440,6 +322,13 @@ def fig_split(w, p, cost, mode, col: str, kind: str, top: int = 8) -> go.Figure:
 
 
 VIA_SLOT = {"viewer": 0, "owner": 3, "authenticated": 2}
+# How the chart names each kind. "authenticated" says how the credential was
+# checked, not who called; it means the person used their own credentials.
+VIA_LABEL = {"authenticated": "direct"}
+
+
+def via_label(via: str) -> str:
+    return ", ".join(VIA_LABEL.get(k, k) for k in via.split(", "))
 
 
 def fig_relation(rel: dict, mode: str) -> go.Figure:
@@ -450,9 +339,14 @@ def fig_relation(rel: dict, mode: str) -> go.Figure:
             msg = f"No estimated spend: {len(df):,} {rel['label']}s, all on unpriced models"
         return empty_fig(mode, msg)
     t = theme.TOKENS[mode]
-    top = df.head(12).iloc[::-1]
+    top = df.head(12).iloc[::-1].reset_index(drop=True)
     labels = [str(x)[:40] for x in top[rel["label"]]]
-    top = top.assign(_y=labels)
+    # Bars sit at row positions, not at their label: two items can share a title
+    # (content with the same name) and each still gets its own bar. The id of the
+    # row, when it has one, shows on hover.
+    id_col = next((c for c in ("content_guid", "id") if c in top), None)
+    top = top.assign(_y=range(len(top)),
+                     _id=top[id_col].astype(str) if id_col else "")
     # Content is coloured by how the user reached it (viewer / owner / ...).
     groups = [(v, top[top.via == v]) for v in top.via.dropna().unique()] \
         if "via" in top else [(None, top)]
@@ -462,14 +356,17 @@ def fig_relation(rel: dict, mode: str) -> go.Figure:
         slot = VIA_SLOT.get(via, 5) if via else 1
         fig.add_bar(
             x=d.est_spend_usd, y=d._y, orientation="h", width=0.6,
-            name=via or "", showlegend=bool(via), marker_color=t["series"][slot],
+            name=via_label(via) if via else "", showlegend=bool(via), marker_color=t["series"][slot],
             text=["\u00a0" + fmt_usd(v) for v in d.est_spend_usd],
             textposition="outside", textfont={"color": t["ink"], "size": 13},
-            hovertemplate="%{y}<br>$%{x:,.2f}" + (f" \u00b7 {via}" if via else "")
+            customdata=d[["_id"]].assign(label=[labels[i] for i in d._y]),
+            hovertemplate="%{customdata[1]}<br>$%{x:,.2f}" + (f" \u00b7 {via_label(via)}" if via else "")
+                          + ("<br>%{customdata[0]}" if id_col else "")
                           + "<extra></extra>",
         )
     fig.update_layout(barmode="overlay")
-    fig.update_yaxes(type="category", categoryorder="array", categoryarray=labels)
+    fig.update_yaxes(tickmode="array", tickvals=list(range(len(top))), ticktext=labels,
+                     range=[-0.5, len(top) - 0.5])
     theme.usd_axis(fig, range=[0, top.est_spend_usd.max() * 1.3], title_text="est. USD")
     return apply(fig, mode, height=max(200, 26 * len(top) + 70),
                  showlegend=any(v for v, _ in groups), hover=True)
@@ -477,60 +374,33 @@ def fig_relation(rel: dict, mode: str) -> go.Figure:
 
 # ---- UI ---------------------------------------------------------------------------
 def panel():
-    """The Profiles tab, a prototype drill-down."""
+    """The Attribution tab, a prototype drill-down."""
     return ui.nav_panel(
-        "Profiles",
-        page_header("Profiles", "Drill down into details for users, groups, content and sessions."),
+        "Attribution",
+        page_header("Attribution", "Compare users, groups, content and sessions, "
+                                   "then pick one to see its details."),
         ui.div(
             ui.div(
                 ui.input_radio_buttons("pf_kind", None, KINDS, selected="user", inline=True),
                 class_="seg",
             ),
-            ui.div(
-                # input_select, not input_selectize: the latter restores a bookmarked
-                # value as the *choices* and crashes the page on reload. The choices
-                # are filled in by the server (`_choices`).
-                ui.input_select(
-                    "pf_pick", None, {}, selectize=True,
-                    options={"placeholder": "pick one\u2026"},
-                ),
-                class_="pf-pick",
-            ),
+            # The pick is set by clicking a row of the table (`pf_row`); the
+            # select only holds it, so bookmarks restore it.
+            # input_select, not input_selectize: the latter restores a bookmarked
+            # value as the *choices* and crashes the page on reload. The choices
+            # are filled in by the server (`_choices`).
+            ui.div(ui.input_select("pf_pick", None, {}, selectize=True), class_="d-none"),
             class_="page-switch",
         ),
-        ui.output_ui("pf_header"),
-        ui.output_ui("pf_kpis"),
-        # Hidden until something is picked: with no principal of the kind in view
-        # (no sessions, say) the tabs were rows of empty cards under the note.
-        ui.panel_conditional("input.pf_pick", ui.div(ui.navset_underline(
-            ui.nav_panel(
-                "Conversations",
-                ui.output_ui("pf_conv_summary"),
-                ui.card(
-                    ui.card_header(
-                        ui.div(
-                            ui.div(
-                                ui.span(ui.output_text("pf_conv_chart_title", inline=True)),
-                                ui.output_ui("pf_conv_help", inline=True),
-                                class_="hdr-flex-left",
-                            ),
-                            ui.div(
-                                ui.div(
-                                    ui.input_radio_buttons(
-                                        "pf_conv_by", None, conv_tools.CONV_BY,
-                                        selected="context", inline=True,
-                                    ),
-                                    class_="seg",
-                                ),
-                                export_button("dl_pf_conv_groups"),
-                                class_="hdr-flex-left",
-                            ),
-                            class_="hdr-flex",
-                        )
-                    ),
-                    output_widget("pf_conv_spend"),
-                ),
-            ),
+        ui.card(
+            ui.card_header(ui.output_text("pf_table_title", inline=True)),
+            ui.card_body(ui.output_ui("pf_table")),
+            class_="peer-card",
+        ),
+        # One box for the picked principal: its name, then its sub-tabs. Hidden
+        # until something is picked: with no principal of the kind in view (no
+        # sessions, say) it was rows of empty cards under the table's note.
+        ui.panel_conditional("input.pf_pick", ui.div(ui.output_ui("pf_header"), ui.navset_underline(
             ui.nav_panel(
                 "Spending",
                 ui.card(
@@ -560,6 +430,25 @@ def panel():
                     ui.card(ui.card_header("By provider"), output_widget("pf_providers")),
                     ui.card(ui.card_header("By origin"), output_widget("pf_origins")),
                     col_widths=[4, 4, 4],
+                ),
+            ),
+            ui.nav_panel(
+                "Conversations",
+                ui.card(
+                    ui.card_header(ui.div(
+                        ui.span("Higher cost and normal conversations"),
+                        CONV_HELP["compare"], class_="hdr-flex-left")),
+                    ui.card_body(ui.output_ui("pf_conv_compare")),
+                ),
+                ui.card(
+                    ui.card_header(ui.div(ui.span("Spend by model"), CONV_HELP["model"],
+                                          class_="hdr-flex-left")),
+                    output_widget("pf_conv_models"),
+                ),
+                ui.card(
+                    ui.card_header(ui.div(ui.span("Spend by harness"), CONV_HELP["tool"],
+                                          class_="hdr-flex-left")),
+                    output_widget("pf_conv_tools"),
                 ),
             ),
             ui.nav_panel(
@@ -599,37 +488,35 @@ def server(input, ctx: PageContext, records_sql):
         df = peers()
         with reactive.isolate():
             cur = input.pf_pick()
-        # Outliers first, in a group of their own, so the page opens on the
-        # biggest one.
-        def options(d: pd.DataFrame) -> dict[str, str]:
-            return {str(k): f"{lab} \u2014 {card_usd(s)}"
-                    for k, lab, s in zip(d.k, d.label, d.spend)}
-
-        flagged = df.why != ""
-        choices: dict[str, Any] = options(df)
-        if flagged.any():
-            choices = {f"Outliers ({flagged.sum():,} of {len(df):,})": options(df[flagged])}
-            if not flagged.all():
-                choices["Others"] = options(df[~flagged])
-        keys = [str(k) for k in pd.concat([df.k[flagged], df.k[~flagged]])]
-        sel = cur if cur in keys else next(iter(keys), None)
+        # peers_df ranks by spend, so the page opens on the biggest spender.
+        choices = {str(k): str(lab) for k, lab in zip(df.k, df.label)}
+        sel = cur if cur in choices else next(iter(choices), None)
         ui.update_selectize("pf_pick", choices=choices, selected=sel)
 
-    @reactive.calc
-    def ent() -> SimpleNamespace:
-        kind, key, df = input.pf_kind(), input.pf_pick(), peers()
-        req(key and key in set(df.k))
-        f = flt()
-        rank = int(df.index[df.k == key][0]) + 1
-        return SimpleNamespace(
-            kind=kind, key=key, f=f, w=where(f), p=pred(kind, key), cost=est_cost(),
-            label=df.label[rank - 1], rank=rank, peers=df, noun=NOUN[kind],
-        )
+    # The peer table's sort: a column, and whether it runs high to low.
+    sort: reactive.Value[tuple[str, bool]] = reactive.value(("", True))
+
+    @reactive.effect
+    @reactive.event(input.pf_sort)
+    def _sort():
+        col = input.pf_sort()
+        cur, desc = sort.get()
+        # Names read best A to Z; figures high to low. A second click flips it.
+        sort.set((col, not desc if col == cur else col != "label"))
+
+    @reactive.effect
+    @reactive.event(input.pf_row)
+    def _row():
+        ui.update_selectize("pf_pick", selected=input.pf_row())
+
+    @render.text
+    def pf_table_title():
+        return f"Compare {NOUN[input.pf_kind()]}s"
 
     @render.ui
-    def pf_header():
-        kind = input.pf_kind()
-        if peers().empty:
+    def pf_table():
+        df, kind = peers(), input.pf_kind()
+        if df.empty:
             why = {
                 "session": " A session is known only when Workbench names it in the "
                            "Gateway-Metadata header (workbench-session-id), and no "
@@ -637,104 +524,29 @@ def server(input, ctx: PageContext, records_sql):
                 "group": " Groups come from Connect; none of the users in view is in one.",
             }.get(kind, "")
             return empty_note(f"No {NOUN[kind]}s in this view.{why}")
-        e = ent()
-        info = identity(e.kind, e.key, e.w, e.cost)
-        facts: list[tuple[str, ui.TagChild]] = []
-        sub = KINDS[e.kind]
-        if e.kind == "user":
-            sub = info["email"] or "user"
-            if info["groups"]:
-                facts.append(("Groups", chips(info["groups"])))
-        elif e.kind == "content":
-            sub = e.key
-            link = f"{usage.connect_server()}/connect/#/apps/{e.key}"
-            facts += [
-                ("owner", info["owner"] or "unknown"),
-                ("auth", info["auth"] or "unknown"),
-                ("viewers", f"{int(info['viewers']):,} named \u00b7 "
-                            f"{int(info['charged']):,} charged"),
-                ("job keys", f"{int(info['jobs']):,} processes"),
-                ("open", ui.a("in Connect \u2197", href=link, target="_blank")),
-            ]
-        elif e.kind == "session":
-            sub = e.key
-            dur = (info["last"] - info["first"]) if pd.notna(info["first"]) else None
-            facts += [
-                ("owner", info["owner"]),
-                ("team", info["team"] or DASH),
-                ("project", " ".join(x for x in (info["project"], info["path"]) if x) or DASH),
-                ("active", f"{info['first']:%Y-%m-%d %H:%M} \u2192 {info['last']:%Y-%m-%d %H:%M}"
-                           + (f" ({dur.days}d {dur.seconds // 3600}h)" if dur is not None else "")),
-            ]
-        else:
-            sub = "Connect group"
-            facts += [
-                ("members", f"{int(info['members']):,} \u00b7 {info['active']:,} active in view"),
-                ("overlap", f"{info['multi']:,} of its members are also in other groups, "
-                            "so their usage counts there too"),
-            ]
-        return ui.div(
-            ui.div(e.label, class_="pf-title"),
-            ui.div(sub, class_="pf-sub"),
-            ui.tags.dl(*[x for k, v in facts for x in (ui.tags.dt(k), ui.tags.dd(v))],
-                       class_="pf-facts"),
-            class_="pf-head",
+        col, desc = sort.get()
+        return peer_table(df, kind, input.pf_pick(), col, desc)
+
+    @reactive.calc
+    def ent() -> SimpleNamespace:
+        kind, key, df = input.pf_kind(), input.pf_pick(), peers()
+        req(key and key in set(df.k))
+        f = flt()
+        return SimpleNamespace(
+            kind=kind, key=key, f=f, w=where(f), p=pred(kind, key), cost=est_cost(),
+            label=df.label[df.k == key].iloc[0], noun=NOUN[kind],
         )
 
     @render.ui
-    def pf_kpis():
-        # Three tiles, each this principal's figure set against the typical
-        # (median) peer of its kind, with an outlier tag in the top 5%. The
-        # figures are the same ones peers_df ranks and flags; the typical
-        # figure and the outlier line are in each tile's help.
+    def pf_header():
+        # The title of the details box, so the sub-tabs read as one principal's
+        # details rather than as more of the table.
         e = ent()
-        r = e.peers.iloc[e.rank - 1]
-        thin = (f"This {e.noun} has fewer than {MIN_BASELINE} conversations, too few "
-                "for its own percentile to compare.")
-        spend = theme.stat_tile(
-            "Estimated spend", card_usd(r.spend), versus_peers(e, "spend"),
-            help=typical_help(e, "spend", fmt_usd,
-                              f"This {e.noun}'s estimated spend in view."))
-        cv = convs()
-        if cv.empty:
-            conv = theme.stat_tile("Conversation cost", DASH,
-                                   "no conversation ids in view")
-        else:
-            # How much of the spend sits in the costliest conversations, those
-            # above this principal's HIGH_PCT percentile.
-            run, total = cv[cv.high], cv.est.sum()
-            enough = len(cv) >= MIN_BASELINE
-            share = (
-                f"{run.est.sum() / total:.0%} of this {e.noun}'s spend "
-                f"({fmt_usd(run.est.sum())}) is in its {len(run):,} conversations "
-                f"above p{HIGH_PCT:g}." if enough and total and len(run) else None)
-            conv = theme.stat_tile(
-                "Conversation cost",
-                DASH if pd.isna(r.conv_p75) else fmt_usd(r.conv_p75),
-                versus_peers(e, "conv_p75", enough=enough),
-                help=typical_help(
-                    e, "conv_p75", fmt_usd,
-                    f"The p{HIGH_PCT:g} of the estimated cost of this {e.noun}'s "
-                    "conversations; the typical figure is the median of each "
-                    f"{e.noun}'s p{HIGH_PCT:g}.",
-                    share, None if enough else thin))
-        peaks = cv.peak_context.dropna() if not cv.empty else pd.Series(dtype=float)
-        if len(peaks) == 0:
-            ctx = theme.stat_tile("Peak context", DASH,
-                                  "no conversation ids in view")
-        else:
-            enough = len(peaks) >= MIN_BASELINE
-            ctx = theme.stat_tile(
-                "Peak context", card_num(r.peak_p75),
-                versus_peers(e, "peak_p75", enough=enough),
-                help=typical_help(
-                    e, "peak_p75", lambda v: f"{card_num(v)} tokens",
-                    "Peak context is the largest input any request in a conversation "
-                    f"sent. This is the p{HIGH_PCT:g} of it across this {e.noun}'s "
-                    f"conversations; the typical figure is the median of each "
-                    f"{e.noun}'s p{HIGH_PCT:g}.",
-                    None if enough else thin))
-        return ui.layout_columns(spend, conv, ctx, col_widths=[4, 4, 4], class_="kpi-row")
+        return ui.div(
+            ui.span(f"{KINDS[e.kind]} details", class_="pf-eyebrow"),
+            ui.span(e.label, class_="pf-title"),
+            class_="pf-head",
+        )
 
     @render_widget
     def pf_trend():
@@ -793,57 +605,29 @@ def server(input, ctx: PageContext, records_sql):
         return conversations(e.w, e.p, e.cost)
 
     @reactive.calc
-    def conv_by() -> str:
-        return input.pf_conv_by() or "context"
-
-    @reactive.calc
-    def conv_grouped() -> SimpleNamespace:
-        """This principal's conversations, each placed in a group of the chosen
-        kind, and the totals per group. Cut at percentiles of its own
-        conversations, so the bands fit this principal and not the server."""
+    def conv_frame() -> pd.DataFrame:
+        """This principal's conversations, with the columns the views read."""
         df = convs().copy()
-        # the frame conv_keys groups
-        df = df.assign(main_model=df.main_model.fillna(df.model), calls=df.turns,
-                       duration_min=df.minutes.clip(lower=0.5),
-                       cache_miss=df.cache_miss_tokens, peak_input=df.peak_context)
-        key, order = conv_tools.conv_keys(df, conv_by())
-        groups = conv_tools.conv_groups(df, key, order)
-        return SimpleNamespace(df=df, key=key, order=order, groups=groups)
+        return df.assign(main_model=df.main_model.fillna(df.model),
+                         duration_min=df.minutes.clip(lower=0.5), peak_input=df.peak_context)
 
-    @render.text
-    def pf_conv_chart_title():
-        return f"Conversation spend for {ent().label} by"
+    def conv_bars(by: str) -> go.Figure:
+        df = conv_frame()
+        key, order = conv_tools.conv_keys(df, by)
+        groups = conv_tools.conv_groups(df, key, order)
+        return conv_tools.conv_bars_fig(groups, flt()["mode"], HIGH_PCT)
 
     @render_widget
-    def pf_conv_spend():
-        g, by, mode = conv_grouped(), conv_by(), flt()["mode"]
-        if by in conv_tools.CURVE_X:
-            return conv_tools.conv_cumulative_fig(g.df, by, mode, HIGH_PCT)
-        return conv_tools.conv_donuts_fig(g.groups, mode, HIGH_PCT)
+    def pf_conv_models():
+        return conv_bars("model")
+
+    @render_widget
+    def pf_conv_tools():
+        return conv_bars("tool")
 
     @render.ui
-    def pf_conv_summary():
-        return conv_summary(convs(), ent().noun, flt()["mode"])
-
-    @render.ui
-    def pf_conv_help():
-        by = conv_by()
-        what = CONV_VIEW_HELP[by]
-        if by in conv_tools.CURVE_X:
-            how = ("Each line adds up its own spend from left to right, so a line that "
-                   "climbs late means that spend sits at the high end. The further apart "
-                   "the two lines, the more this measure sets the costly conversations "
-                   "apart from the rest.")
-        else:
-            how = ("Each donut splits spend into higher-cost and normal conversations. The "
-                   "number inside is the higher-cost share, amber when it is "
-                   f"{conv_tools.DONUT_ABOVE:.0%} or more above the share for all "
-                   "conversations.")
-        return help_icon(conv_tools.CONV_BY[by], ui.p(what), ui.p(how, class_="mb-0"))
-
-    register_export("pf_conv_groups",
-                    lambda: conv_tools.conv_group_table(conv_grouped().groups),
-                    "profile_conversation_groups.csv")
+    def pf_conv_compare():
+        return conv_compare(conv_frame(), ent().noun, flt()["mode"])
 
     # Every record of the picked principal, uncapped: DuckDB writes the file.
     register_sql_export(
@@ -853,101 +637,126 @@ def server(input, ctx: PageContext, records_sql):
     )
 
 
-# What each view of the conversation chart measures, for its help.
-CONV_VIEW_HELP = {
-    "context": "Peak context: the largest input any request in the conversation sent, "
-               "cached and uncached tokens alike.",
-    "model": "Each conversation counts under the model it spent most on.",
-    "duration": "Duration: the time from a conversation's first request to its last.",
-    "turns": "Turns: the number of requests in the conversation.",
-    "pace": "Pace: the typical (median) pause between a conversation's requests. "
-            "Single-request conversations have no pause and are left out.",
-    "cache": "Cache misses: the input tokens, summed over all the conversation's requests, "
-             "that were not read from the prompt cache (fresh input and cache writes). "
-             "A long conversation that keeps missing the cache sits far right.",
-    "tool": "Each conversation counts under the harness it spent most through, read "
-            "from the User-Agent header.",
+# What each part of the Conversations tab shows, for its help.
+CONV_HELP = {
+    "compare": help_icon(
+        "Higher cost and normal",
+        ui.p("A conversation is higher cost when it costs more than the stated share of "
+             "this principal's own conversations, so the line fits their usage and not a "
+             "fixed dollar amount. Normal is the rest."),
+        ui.p("Typical conversation: the median of each group. Peak context: the largest "
+             "input any request sent, cached tokens included. Duration: first request to "
+             "last. How often: the share of each group's conversations with the trait. "
+             "The gap is higher cost against normal; the last column says what to do "
+             "about a big one.", class_="mb-0"),
+    ),
+    "model": help_icon(
+        "Spend by model",
+        ui.p("Each conversation counts under the model it spent most on."),
+        ui.p("Each bar splits spend into higher-cost and normal conversations, so the "
+             "amber part compares across rows. The top bar is all conversations; each "
+             "label gives that group's share of all spend.", class_="mb-0"),
+    ),
+    "tool": help_icon(
+        "Spend by harness",
+        ui.p("Each conversation counts under the harness it spent most through, read "
+             "from the User-Agent header."),
+        ui.p("Each bar splits spend into higher-cost and normal conversations, so the "
+             "amber part compares across rows.", class_="mb-0"),
+    ),
 }
 
 
-def conv_summary(cv: pd.DataFrame, noun: str, mode: str) -> ui.Tag:
-    """The box at the top of the Conversations tab: how many conversations
-    there are, where the higher-cost line sits, and how the two camps split
-    the count and the spend."""
+def conv_compare(cv: pd.DataFrame, noun: str, mode: str) -> ui.Tag:
+    """The Compare view: higher-cost and normal conversations side by side, as
+    a table of how many there are, what they cost and how they differ."""
     n = len(cv)
     if not n:
-        return ui.div(f"No conversations for this {noun} in view.", class_="conv-summary")
-    priced = cv[cv.est > 0]
-    unpriced = n - len(priced)
-    count = ui.div(
-        ui.div(f"{n:,}", class_="conv-summary-num"),
-        ui.div("conversations", class_="conv-summary-label"),
-        ui.div(f"{unpriced:,} with no estimated spend", class_="conv-summary-sub")
-        if unpriced else None,
-        class_="conv-summary-count",
-    )
-    if n < MIN_BASELINE:
-        return ui.div(count, ui.div(
-            f"Too few to split by cost: a conversation is marked higher cost against "
-            f"this {noun}'s p{HIGH_PCT:g}, which needs {MIN_BASELINE}+ conversations.",
-            class_="conv-summary-how"), class_="conv-summary")
-    total, line = float(priced.est.sum()), float(cv.line.iloc[0])
-    hi, lo = cv[cv.high], cv[~cv.high]
-    colours = (theme.STATUS["warning"], theme.TOKENS[mode]["series"][0])
+        return ui.div(f"No conversations for this {noun} in view.", class_="empty-note")
+    rows = conv_tools.conv_compare_rows(cv)
+    if not rows:
+        return ui.div(
+            f"{n:,} conversations: too few to split by cost. A conversation is marked "
+            f"higher cost against this {noun}'s p{HIGH_PCT:g}, which needs "
+            f"{MIN_BASELINE}+ conversations.", class_="empty-note")
+    unpriced = n - int((cv.est > 0).sum())
+    colours = (theme.TOKENS[mode]["series"][0], theme.STATUS["warning"])
 
-    def split(label: str, parts: list[tuple[float, str]]) -> ui.Tag:
-        """One labelled bar, higher cost then normal, each part as wide as its share."""
-        whole = sum(v for v, _ in parts) or 1
-        segs = []
-        for (v, text), colour, cls in zip(parts, colours, ("hi", "lo")):
-            share = v / whole
-            segs.append(ui.div(
-                # A thin part keeps its title; its text would not fit.
-                f"{text} \u00b7 {share:.0%}" if share >= 0.12 else "",
-                class_=f"conv-split-seg conv-split-{cls}",
-                style=f"width:{share:.2%};background:{colour}",
-                title=f"{text} \u00b7 {share:.0%}",
-            ))
-        return ui.div(ui.div(label, class_="conv-split-label"),
-                      ui.div(*segs, class_="conv-split-bar"), class_="conv-split-row")
+    def head(text: str, colour: str | None = None) -> ui.Tag:
+        dot = ui.span(class_="tile-dot", style=f"background:{colour}") if colour else None
+        return ui.tags.th(dot, f" {text}" if dot else text)
 
-    def key(colour: str, name: str) -> ui.Tag:
-        return ui.span(ui.span(class_="tile-dot", style=f"background:{colour}"),
-                       f" {name}", class_="conv-summary-key")
-
+    body: list = []
+    section = None
+    for r in rows:
+        if r["section"] != section:
+            section = r["section"]
+            body.append(ui.tags.tr(ui.tags.th(section, colspan="5"), class_="cmp-section"))
+        body.append(ui.tags.tr(
+            ui.tags.td(r["label"], class_="cmp-label"),
+            ui.tags.td(r["normal"]), ui.tags.td(r["high"]),
+            ui.tags.td(r["gap"], class_="cmp-gap"),
+            ui.tags.td(r["hint"], class_="cmp-hint"),
+        ))
     return ui.div(
-        count,
         ui.div(
-            split("conversations", [(len(hi), f"{len(hi):,}"), (len(lo), f"{len(lo):,}")]),
-            split("spend", [(float(hi.est.sum()), fmt_usd(float(hi.est.sum()))),
-                            (float(lo.est.sum()), fmt_usd(float(lo.est.sum())))]),
-            ui.div(
-                key(colours[0], "higher cost"),
-                key(colours[1], "normal"),
-                help_icon(
-                    "Higher cost and normal",
-                    ui.p(
-                        ui.strong("Higher cost"),
-                        f" conversations cost more than {HIGH_PCT:g}% of this {noun}'s "
-                        f"own conversations: over {fmt_usd(line)}, its p{HIGH_PCT:g}. ",
-                        ui.strong("Normal"), " is the rest.",
-                    ),
-                    ui.p(
-                        f"The line is drawn from this {noun}'s own conversations, "
-                        "so it fits their usage rather than a fixed dollar amount. A "
-                        "conversation's cost is the estimated cost of all its requests.",
-                        class_="mb-0",
-                    ),
-                ),
-                class_="conv-summary-keys",
-            ),
-            class_="conv-summary-splits",
-        ),
-        class_="conv-summary",
-    ) if total else ui.div(count, class_="conv-summary")
+            f"{n:,} conversations" + (f", {unpriced:,} with no estimated spend" if unpriced else "")
+            + f". Higher cost is over {fmt_usd(float(cv.line.iloc[0]))}, this {noun}'s "
+            f"p{HIGH_PCT:g}; normal is the rest.",
+            class_="cmp-note"),
+        ui.tags.table(
+            ui.tags.thead(ui.tags.tr(
+                head(""), head("Normal", colours[0]), head("Higher cost", colours[1]),
+                head("Gap"), head("What to do"))),
+            ui.tags.tbody(*body), class_="cmp-table"),
+        class_="cmp")
 
 
-def chips(names: list[str]):
-    if not names:
-        return None
-    return ui.span(*[ui.span(n, class_="pf-chip") for n in names])
+def peer_table(df: pd.DataFrame, kind: str, sel: str | None, sort: str, desc: bool) -> ui.Tag:
+    """Every principal of a kind side by side; clicking a row picks it.
+
+    `sort` is "label", "spend" or "top_model", or "" for outliers first then spend.
+    """
+    if sort:
+        df = df.sort_values(sort, ascending=not desc, na_position="last")
+    else:
+        df = df.sort_values(["outlier", "spend"], ascending=False)
+    top = float(df.spend.max() or 1)
+
+    def head(col: str, text: str) -> ui.Tag:
+        arrow = (" \u25bc" if desc else " \u25b2") if col == sort else ""
+        return ui.tags.th(
+            text + arrow, class_="sortable" + (" sorted" if col == sort else ""),
+            onclick=f"Shiny.setInputValue('pf_sort', {col!r}, {{priority: 'event'}})")
+
+    rows = [
+        ui.tags.tr(
+            ui.tags.td(
+                ui.span(str(label), class_="pt-name"),
+                ui.span("outlier", class_="versus versus-outlier") if out else None),
+            ui.tags.td(
+                ui.span(ui.span(class_="pt-bar", style=f"width:{100 * spend / top:.1f}%"),
+                        class_="pt-track"),
+                ui.span(fmt_usd(spend)), class_="pt-spend"),
+            ui.tags.td(str(model) if pd.notna(model) else DASH),
+            class_="pt-row" + (" pt-sel" if str(k) == sel else ""),
+            onclick=f"Shiny.setInputValue('pf_row', {str(k)!r}, {{priority: 'event'}})",
+        )
+        for k, label, spend, model, out in zip(
+            df.k, df.label, df.spend.astype(float), df.top_model, df.outlier)
+    ]
+    n = int(df.outlier.sum())
+    return ui.div(
+        ui.div(
+            f"{len(df):,} {NOUN[kind]}s in view"
+            + (f", {n:,} outliers (top {100 - OUTLIER_PCT}% of {NOUN[kind]}s by spend)"
+               if n else "")
+            + ". Click a column to sort, a row to see its details below.",
+            class_="cmp-note"),
+        ui.div(ui.tags.table(
+            ui.tags.thead(ui.tags.tr(
+                head("label", KINDS[kind]), head("spend", "Est. spend"),
+                head("top_model", "Top model"))),
+            ui.tags.tbody(*rows), class_="cmp-table peer-table"), class_="pt-scroll"),
+    )
+

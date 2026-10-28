@@ -23,8 +23,9 @@ KINDS = {"user": "Users", "content": "Content"}
 KIND_COL = {"user": "username", "content": "content_guid"}
 KIND_NOUN = {"user": "users", "content": "content items"}
 KIND_NOTE = {
-    "user": "People: a request from Connect content counts for the user it was "
-            "charged to, the viewer or the content's owner.",
+    "user": "People who made requests in Workbench or Connect. A request from "
+            "Connect content counts for the user it was charged to, the viewer "
+            "or the content's owner.",
     "content": "Connect content items that made requests. Workbench traffic has "
                "no content item and is left out.",
 }

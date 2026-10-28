@@ -57,49 +57,48 @@ def test_peers_rank_and_flag_outliers(loaded, f):
     assert users.spend.sum() == pytest.approx(loaded.scalar(
         f"SELECT SUM({cost}) FROM gateway_events WHERE {w} AND username IS NOT NULL"))
     assert users.label.is_unique
-    # The fake Connect has a content item whose every prompt is huge.
+    # The fake Connect has a runaway content item: the top spender, and flagged.
     content = principals.peers_df("content", w, cost)
-    reasons = {r for why in content.why for r in why.split(" + ") if r}
-    assert {"high estimated spend", "high peak context"} <= reasons
-    assert (content.why != "").sum() < len(content) / 2
+    assert content.outlier.iloc[0]
+    assert content.outlier.sum() < len(content) / 2
 
 
-def test_kpi_badges_compare_to_peers_and_tag_outliers(loaded, f):
+def test_peer_table_lists_outliers_first_and_marks_the_pick(loaded, f):
     peers = principals.peers_df("content", filters.where(f), pricing.est_cost())
-    e = SimpleNamespace(peers=peers, rank=1, noun="content item")
-    # The runaway content item is first by spend and an outlier on it.
-    top = str(principals.versus_peers(e, "spend"))
-    assert "above typical" in top and "versus-outlier" in top
-    # The figures behind the badges are in the tile's help.
-    help = str(principals.typical_help(e, "spend", principals.fmt_usd, "Spend.", "Extra."))
-    assert "Typical content item: " in help and "Outlier" in help and "Extra." in help
-    e.rank = len(peers)
-    assert "versus-outlier" not in str(principals.versus_peers(e, "spend"))
-    # Too few conversations of its own: no above/below badge.
-    assert principals.versus_peers(e, "conv_p75", enough=False) is None
+    top = peers.k.iloc[0]
+    html = str(principals.peer_table(peers, "content", str(top), "", True))
+    # One row per content item; the runaway one leads, picked and flagged.
+    assert html.count('class="pt-row') == len(peers)
+    first = html[html.index('class="pt-row'):]
+    first = first[:first.index("</tr>")]
+    assert "pt-sel" in first and "versus-outlier" in first
+    assert f"&apos;pf_row&apos;, &apos;{top}&apos;" in first
+    # Sorted by a column, low to high.
+    asc = str(principals.peer_table(peers, "content", None, "spend", False))
+    assert "\u25b2" in asc and "pt-sel" not in asc
 
 
-def test_conversation_summary_splits_the_two_camps():
+def test_conversation_compare_splits_the_two_camps():
     est = pd.Series([1.0] * 30 + [10.0] * 10)
-    cv = pd.DataFrame({"est": est})
+    cv = pd.DataFrame({"est": est, "duration_min": 1.0, "peak_input": 1.0,
+                       "miss_tokens": 0.0, "uses_cache": True})
     cv[["high", "line"]] = principals.higher_cost(cv.est)
-    box = str(principals.conv_summary(cv, "user", "dark"))
+    table = str(principals.conv_compare(cv, "user", "dark"))
     # 10 of 40 cost $10, the rest $1: $100 of $130 is in the higher-cost camp
-    assert "40" in box and "higher cost" in box and "normal" in box
-    # the conversations bar is 10 of 40, the spend bar $100 of $130
-    assert "10 \u00b7 25%" in box and "\u00b7 77%" in box
-    few = str(principals.conv_summary(cv.head(3), "user", "dark"))
-    assert "Too few to split" in few and "normal" not in few
+    assert "40 conversations" in table and "Higher cost" in table and "Normal" in table
+    assert "10 \u00b7 25%" in table and "\u00b7 77%" in table
+    few = str(principals.conv_compare(cv.head(3), "user", "dark"))
+    assert "too few to split" in few and "Normal" not in few
 
 
 def test_principals_panel_outputs():
     html = str(ui.TagList(ui.navset_tab(principals.panel(), id="main_tabs")))
-    assert 'data-value="Profiles"' in html
+    assert 'data-value="Attribution"' in html
     for output_id in (
-        "pf_kind", "pf_pick", "pf_header", "pf_kpis", "pf_grain", "pf_trend",
+        "pf_kind", "pf_pick", "pf_table", "pf_header", "pf_grain", "pf_trend",
         "pf_models", "pf_providers", "pf_origins",
         "dl_pf_records", "pf_rel_0_chart", "dl_pf_rel_1",
-        "pf_conv_by", "pf_conv_summary", "pf_conv_spend", "pf_conv_help", "dl_pf_conv_groups",
+        "pf_conv_compare", "pf_conv_models", "pf_conv_tools",
     ):
         assert f'id="{output_id}"' in html
 
@@ -111,13 +110,12 @@ def test_principals_exports_use_raw_data_sql(loaded, f, make_ctx):
     user = peers.k.iloc[0]
     inputs = SimpleNamespace(
         pf_kind=lambda: "user", pf_pick=lambda: user,
-        pf_conv_by=lambda: "model", pf_grain=lambda: "day",
+        pf_grain=lambda: "day", pf_sort=lambda: "", pf_row=lambda: "",
     )
     records_sql = raw_data.server(inputs, ctx)
     principals.server(inputs, ctx, records_sql)
     assert {name: filename for name, (_, filename) in exports.items()} == {
         "pf_rel_0": "pf_connections_1.csv", "pf_rel_1": "pf_connections_2.csv",
-        "pf_conv_groups": "profile_conversation_groups.csv",
     }
     assert sql_exports["pf_records"][1] == "profile_records.csv"
 
@@ -126,12 +124,10 @@ def test_principals_exports_use_raw_data_sql(loaded, f, make_ctx):
         sql = sql_exports["pf_records"][0]()
         assert sql == records_sql(f"{filters.where(f)} AND {principals.pred('user', user)}")
         records = loaded.q(sql)
-        groups = exports["pf_conv_groups"][0]()
         content = exports["pf_rel_0"][0]()
     assert len(records) == peers.requests.iloc[0]
     assert set(records.username) == {user}
     assert "LIMIT" not in sql
-    assert groups.conversations.sum() == records.conversation_id.nunique()
     assert "content" in content.columns
 
 
