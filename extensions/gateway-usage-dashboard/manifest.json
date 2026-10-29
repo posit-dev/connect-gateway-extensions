@@ -9,6 +9,9 @@
       "AI Gateway"
     ],
     "minimumConnectVersion": "2026.11.0",
+    "requiredFeatures": [
+      "OAuth Integrations"
+    ],
     "adminOnly": true,
     "version": "0.1.1"
   },
