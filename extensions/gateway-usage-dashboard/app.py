@@ -54,11 +54,18 @@ PRESETS = {
 DEFAULT_PRESET = "30d"
 
 
+def _day(sql: str) -> date:
+    """A day from the loaded data; today when there is no data, since MIN and
+    MAX over no rows are NULL and the date picker cannot take that."""
+    day = usage.scalar(sql)
+    return date.today() if pd.isna(day) else day.date()
+
+
 def catalog() -> dict:
     """What the loaded data covers. Re-read after every refresh."""
     return {
-        "start": usage.scalar("SELECT MIN(day) FROM gateway_events").date(),
-        "end": usage.scalar("SELECT MAX(day) FROM gateway_events").date(),
+        "start": _day("SELECT MIN(day) FROM gateway_events"),
+        "end": _day("SELECT MAX(day) FROM gateway_events"),
         "users": usage.q("""SELECT DISTINCT username FROM gateway_events
                          WHERE username IS NOT NULL ORDER BY 1""")["username"].tolist(),
         # Choice labels for the user picker: the username, and the email beside

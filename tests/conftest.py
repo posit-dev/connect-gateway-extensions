@@ -209,6 +209,8 @@ def _running_app(env: dict[str, str]) -> Iterator[str]:
             try:
                 urllib.request.urlopen(f"{url}/", timeout=1).close()
                 break
+            except urllib.error.HTTPError:
+                break  # it answered; a failing page is for the test to report
             except (urllib.error.URLError, ConnectionError):
                 time.sleep(0.1)
         else:
@@ -288,6 +290,21 @@ def sparse_app_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]
             yield url
 
 
+@pytest.fixture(scope="session")
+def empty_app_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """The app against a Connect whose usage export has no rows: a server that
+    has the gateway on and has not served a request yet. Its own fake and app,
+    so the shared ones keep their data.
+    """
+    with _running_fake(FAKE_ROWS="0") as fake:
+        env = {**os.environ, "CONNECT_SERVER": fake, "CONNECT_API_KEY": "test",
+               "GATEWAY_CACHE_DIR": str(tmp_path_factory.mktemp("empty-cache"))}
+        env.pop("GATEWAY_FROM", None)
+        env.pop("GATEWAY_TO", None)
+        with _running_app(env) as url:
+            yield url
+
+
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Mark every test that needs the fake Connect, so -m can select them."""
     for item in items:
@@ -296,6 +313,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.connect)
         if "app_server" in names:
             item.add_marker(pytest.mark.app)
-        if "sparse_app_server" in names:
+        if "sparse_app_server" in names or "empty_app_server" in names:
             item.add_marker(pytest.mark.app)
             item.add_marker(pytest.mark.connect)

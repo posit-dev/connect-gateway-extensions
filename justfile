@@ -16,6 +16,12 @@ setup: (_install "extensions/gateway-usage-dashboard/requirements.txt")
 # Create .venv with the app's requirements plus the development tools.
 setup-dev: (_install "dev-requirements.txt")
 
+# Re-resolve the app's requirements.txt from requirements.in. It pins every
+# package, for each Python version from 3.10 up, so a deploy installs what the
+# tests ran on. Needs uv.
+lock:
+    cd extensions/gateway-usage-dashboard && uv pip compile requirements.in --universal --python-version 3.10 -o requirements.txt
+
 # Install a requirements file into .venv, creating it if missing. Uses uv when it
 # is on PATH: a venv uv made has no pip, so `.venv/bin/pip` would not exist.
 _install file:

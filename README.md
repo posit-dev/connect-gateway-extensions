@@ -135,6 +135,11 @@ To rebuild the Connect exports after Connect's export changes, run
 container, with the checkout mounted read-only.
 Importing `usage` does nothing; `app.py` runs the first `usage.load()`.
 
+The app's packages are pinned. Edit `requirements.in`, run `just lock` to
+regenerate `requirements.txt`, and run the tests on the oldest and newest Python
+the app supports before you release. The lock gives Python 3.10 pandas 2 and
+duckdb 1, and Python 3.11 and later pandas 3 and duckdb 2.
+
 `dev-requirements.txt` adds pytest, pyright, the pandas type stubs, and
 `websockets` for the session smoke test. None of it, `pytest.ini`,
 `pyrightconfig.json` or `tests/` is deployed.
