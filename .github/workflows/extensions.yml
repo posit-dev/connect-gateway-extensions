@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   extensions:
@@ -38,22 +39,31 @@ jobs:
     needs: [extensions]
     if: always() && github.ref_name == 'main'
     steps:
-      # main is protected, so the default GITHUB_TOKEN cannot push the
-      # regenerated extensions.json. The GitHub App is allowed to bypass the
-      # pull request requirement.
-      - name: Generate token for GitHub App
-        id: generate-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ vars.GATEWAY_EXTENSIONS_APP_CLIENT_ID }}
-          private-key: ${{ secrets.GATEWAY_EXTENSIONS_APP_PEM }}
-          permission-contents: write
-
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.ref_name }}
-          token: ${{ steps.generate-token.outputs.token }}
 
+      # main is protected, so the regenerated extensions.json goes to a branch
+      # and a pull request instead of a direct push.
       - uses: posit-dev/connect-gallery-action@main
+        id: gallery
         with:
           extensions-dir: extensions
+          commit: "false"
+
+      - name: Open a pull request for extensions.json
+        if: steps.gallery.outputs.has-updates == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C update-extensions-json
+          git add extensions.json
+          git commit -m "chore: update extensions.json"
+          git push --force origin update-extensions-json
+          if gh pr view update-extensions-json --json state --jq .state | grep -qx OPEN; then
+            echo "A pull request for update-extensions-json is already open."
+          elif ! gh pr create --base main --head update-extensions-json \
+            --title "chore: update extensions.json" \
+            --body "Regenerated from the latest releases by the Extensions workflow."; then
+            echo "::warning::Could not open a pull request. Open one from update-extensions-json: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...update-extensions-json"
+          fi
