@@ -12,7 +12,7 @@ import principals
 import queries
 import theme
 import usage
-from filters import Filters, sql_str
+from filters import Filters, Params, sql_str
 
 
 # ---- usage._catalog_prices ---------------------------------------------------
@@ -229,8 +229,12 @@ def test_pred_is_evaluable_sql_that_cannot_be_escaped(kind):
     con.execute("CREATE TABLE user_groups(user_guid VARCHAR, group_guid VARCHAR)")
     con.execute("INSERT INTO gateway_events VALUES ('u1','u1','c1'), ('u2','u2','c2')")
     con.execute("INSERT INTO user_groups VALUES ('u1', 'g1')")
-    count = lambda key: con.execute(  # noqa: E731
-        f"SELECT count(*) FROM gateway_events WHERE {queries.pred(kind, key)}").fetchall()[0][0]
+
+    def count(key: str) -> int:
+        p = Params()
+        sql = f"SELECT count(*) FROM gateway_events WHERE {queries.pred(kind, key, p)}"
+        return con.execute(sql, p.values).fetchall()[0][0]
+
     assert count(hostile) == 0
     expected = {"group": ("g1", 1)}.get(kind)
     if expected:
@@ -333,20 +337,22 @@ def f() -> Filters:
     return Filters(start=date(2026, 9, 1), end=date(2026, 9, 30))
 
 
-def _matching(predicate: str, stamps: list[str]) -> list[str]:
+def _matching(f: Filters, stamps: list[str]) -> list[str]:
+    p = Params()
+    predicate = f.where(p)
     con = duckdb.connect()
     con.execute("CREATE TABLE gateway_events(ts TIMESTAMP)")
     for s in stamps:
         con.execute("INSERT INTO gateway_events VALUES (?)", [s])
     rows = con.execute(f"SELECT strftime(ts, '%Y-%m-%d %H:%M:%S.%g') FROM gateway_events "
-                       f"WHERE {predicate} ORDER BY ts").fetchall()
+                       f"WHERE {predicate} ORDER BY ts", p.values).fetchall()
     return [r[0] for r in rows]
 
 
 def test_where_includes_both_edge_days_entirely(f):
     stamps = ["2026-08-31 23:59:59.999", "2026-09-01 00:00:00", "2026-09-15 12:00:00",
               "2026-09-30 23:59:59.999", "2026-10-01 00:00:00"]
-    got = _matching(f.where(), stamps)
+    got = _matching(f, stamps)
     assert len(got) == 3
     assert got[0].startswith("2026-09-01 00:00:00")
     assert got[-1].startswith("2026-09-30 23:59:59")
@@ -356,4 +362,4 @@ def test_where_single_day_window(f):
     f = replace(f, start=date(2026, 9, 5), end=date(2026, 9, 5))
     stamps = ["2026-09-04 23:59:59", "2026-09-05 00:00:00", "2026-09-05 23:59:59.5",
               "2026-09-06 00:00:00"]
-    assert len(_matching(f.where(), stamps)) == 2
+    assert len(_matching(f, stamps)) == 2

@@ -543,7 +543,8 @@ def server(input, output, session):
         c = cat()
         dates = input.date_range()
         if dates and dates[0] and dates[1]:
-            start, end = dates
+            # A date input can arrive as text, from a bookmark or a plain client.
+            start, end = (date.fromisoformat(d) if isinstance(d, str) else d for d in dates)
         else:
             start, end = preset_range(input.preset(), c["start"], c["end"])
         return Filters(
@@ -604,7 +605,7 @@ def server(input, output, session):
         renderer = render.download_button(filename=filename)(_export)
         output(id=f"dl_{name}", suspend_when_hidden=False)(renderer)
 
-    def register_sql_export(name: str, sql_fn, filename: str):
+    def register_sql_export(name: str, query_fn, filename: str):
         """A CSV download for a query that can return a very large result.
 
         DuckDB writes the file and it is streamed out in 1 MB pieces, so the
@@ -612,7 +613,7 @@ def server(input, output, session):
         """
 
         def _export():
-            path = usage.export_csv(sql_fn())
+            path = usage.export_csv(query_fn())
             try:
                 with open(path, "rb") as fh:
                     while chunk := fh.read(1 << 20):

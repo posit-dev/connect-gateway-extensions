@@ -2,6 +2,11 @@
 
 Page code calls these and does the formatting and charting. Functions that
 take a `Filters` narrow to the rows in view; the rest read the whole table.
+
+Values (filter picks, principal keys, dates, names read from the data) are bound
+as `$name` parameters through `Params`, never written into the SQL text. What
+stays text is what a parameter cannot be: column names and time grains, which
+callers choose from fixed lists, and the price expression from pricing.py.
 """
 
 from __future__ import annotations
@@ -12,7 +17,7 @@ from datetime import date
 import pandas as pd
 
 import usage
-from filters import TOKEN_COUNT, Filters, dim_sql, sql_str
+from filters import TOKEN_COUNT, Filters, Params, Query, dim_sql, sql_str
 from pricing import est_cost, est_cost_uncached
 
 
@@ -87,23 +92,26 @@ def metadata_pairs() -> pd.DataFrame:
 
 # ---- the rows in view -------------------------------------------------------------
 def record_count(f: Filters) -> int:
-    return int(usage.scalar(f"SELECT COUNT(*) FROM gateway_events WHERE {f.where()}"))
+    p = Params()
+    return int(usage.scalar(f"SELECT COUNT(*) FROM gateway_events WHERE {f.where(p)}", p.values))
 
 
 def total_spend(f: Filters) -> float:
+    p = Params()
     return usage.scalar(
-        f"SELECT COALESCE(SUM({est_cost()}),0) FROM gateway_events WHERE {f.where()}"
+        f"SELECT COALESCE(SUM({est_cost()}),0) FROM gateway_events WHERE {f.where(p)}", p.values
     )
 
 
 def unpriced_models(f: Filters) -> pd.DataFrame:
     """model, requests: models that carried tokens but cost $0 for want of a price."""
+    p = Params()
     return usage.q(f"""SELECT model, COUNT(*) requests
                        FROM gateway_events
-                       WHERE {f.where()} AND model IS NOT NULL AND model <> ''
+                       WHERE {f.where(p)} AND model IS NOT NULL AND model <> ''
                        GROUP BY 1
                        HAVING SUM({est_cost()}) = 0 AND SUM({TOKEN_COUNT}) > 0
-                       ORDER BY 2 DESC""")
+                       ORDER BY 2 DESC""", p.values)
 
 
 # ---- raw records ------------------------------------------------------------------
@@ -132,19 +140,31 @@ _RECORD_COLS = """ts, source AS origin, tool, user_agent, username, user_kind AS
                      CAST(request_metadata AS VARCHAR) AS request_metadata"""
 
 
-def records_sql(where_sql: str, limit: str = "") -> str:
-    """The SQL for every record matching a predicate, newest first.
-
-    Returned as text because the CSV export hands it to DuckDB to write the file.
-    `limit` is appended verbatim, for example " LIMIT 2000".
-    """
+def _records(where_sql: str, p: Params, limit: int | None) -> Query:
     cols = _RECORD_COLS.replace("EST_COST_EXPR", est_cost())
-    return f"SELECT {cols} FROM gateway_events WHERE {where_sql} ORDER BY ts DESC{limit}"
+    cap = f" LIMIT {limit}" if limit else ""
+    return Query(
+        f"SELECT {cols} FROM gateway_events WHERE {where_sql} ORDER BY ts DESC{cap}", p.values)
+
+
+def records_query(f: Filters, limit: int | None = None) -> Query:
+    """Every record in view, newest first, or the newest `limit`.
+
+    A Query and not rows, because the CSV export hands it to DuckDB to write the file.
+    """
+    p = Params()
+    return _records(f.where(p), p, limit)
+
+
+def principal_records_query(f: Filters, kind: str, key: str) -> Query:
+    """Every record of one principal in view, uncapped."""
+    p = Params()
+    return _records(f"{f.where(p)} AND {pred(kind, key, p)}", p, None)
 
 
 def records(f: Filters, limit: int) -> pd.DataFrame:
     """The newest `limit` records in view."""
-    return usage.q(records_sql(f.where(), f" LIMIT {limit}"))
+    return usage.q(*records_query(f, limit))
 
 
 # ---- adoption ---------------------------------------------------------------------
@@ -154,13 +174,14 @@ def active_principals(f: Filters, col: str, history_from: date) -> pd.DataFrame:
     Windows look back to `history_from`, before the start of the range, so a
     30-day chart does not start with an empty MAU. Every other filter applies.
     """
+    p = Params()
     return usage.q(f"""
         WITH days AS (
             SELECT CAST(d AS DATE) AS d
-            FROM generate_series(DATE '{f.start}', DATE '{f.end}',
+            FROM generate_series({p.bind(f.start)}::DATE, {p.bind(f.end)}::DATE,
                                  INTERVAL 1 DAY) t(d)),
         ev AS (SELECT DISTINCT day, {col} AS who FROM gateway_events
-               WHERE {replace(f, start=history_from).where()} AND {col} IS NOT NULL)
+               WHERE {replace(f, start=history_from).where(p)} AND {col} IS NOT NULL)
         SELECT days.d AS day,
                COUNT(DISTINCT CASE WHEN ev.day = days.d THEN ev.who END) AS dau,
                COUNT(DISTINCT CASE WHEN ev.day > days.d - INTERVAL 7 DAY
@@ -168,31 +189,30 @@ def active_principals(f: Filters, col: str, history_from: date) -> pd.DataFrame:
                COUNT(DISTINCT ev.who) AS mau
         FROM days LEFT JOIN ev
           ON ev.day <= days.d AND ev.day > days.d - INTERVAL 30 DAY
-        GROUP BY 1 ORDER BY 1""")
+        GROUP BY 1 ORDER BY 1""", p.values)
 
 
-def _active_in_view(f: Filters, col: str, dim: str) -> str:
+def _active_in_view(f: Filters, col: str, dim: str, p: Params) -> str:
     # Requests with no User-Agent are a line of their own: on a server whose
     # callers send none, leaving them out made the chart look empty.
-    return (f"FROM gateway_events WHERE {f.where()} AND {col} IS NOT NULL "
+    return (f"FROM gateway_events WHERE {f.where(p)} AND {col} IS NOT NULL "
             f"AND {dim_sql(dim)} <> ''")
 
 
 def top_by_active(f: Filters, col: str, dim: str, n: int = 6) -> list[str]:
     """The `n` values of `dim` with the most distinct `col` active in view."""
-    k = dim_sql(dim)
-    return usage.q(f"""SELECT {k} AS k {_active_in_view(f, col, dim)} GROUP BY 1
-                       ORDER BY COUNT(DISTINCT {col}) DESC LIMIT {n}""").k.tolist()
+    k, p = dim_sql(dim), Params()
+    return usage.q(f"""SELECT {k} AS k {_active_in_view(f, col, dim, p)} GROUP BY 1
+                       ORDER BY COUNT(DISTINCT {col}) DESC LIMIT {n}""", p.values).k.tolist()
 
 
 def active_by_bucket(f: Filters, col: str, dim: str, grain: str, keep: list[str]) -> pd.DataFrame:
     """b, k, users, requests per `grain` bucket; values of `dim` not in `keep` fold to "Other"."""
-    k = dim_sql(dim)
-    kept = ",".join(sql_str(x) for x in keep)
+    p = Params()
     return usage.q(f"""SELECT date_trunc('{grain}', day)::DATE AS b,
-                              CASE WHEN {k} IN ({kept}) THEN {k} ELSE 'Other' END AS k,
+                              {_folded(dim, keep, p)} AS k,
                               COUNT(DISTINCT {col}) AS users, COUNT(*) AS requests
-                       {_active_in_view(f, col, dim)} GROUP BY 1, 2 ORDER BY 1""")
+                       {_active_in_view(f, col, dim, p)} GROUP BY 1, 2 ORDER BY 1""", p.values)
 
 
 # ---- overview ---------------------------------------------------------------------
@@ -206,6 +226,7 @@ def overview_totals(f: Filters) -> pd.Series:
     `*_est` columns): all of the spend over two content items read as $3,769 per
     item when nearly all of it came from people outside content.
     """
+    p = Params()
     return usage.q(f"""SELECT COALESCE(SUM({est_cost()}),0) est,
                            COUNT(*) requests,
                            COUNT(DISTINCT username) users,
@@ -220,30 +241,29 @@ def overview_totals(f: Filters) -> pd.Series:
                                WHERE content_guid IS NOT NULL), 0) content_est,
                            COALESCE(SUM({est_cost()}) FILTER (
                                WHERE workbench_session_id IS NOT NULL), 0) session_est
-                    FROM gateway_events WHERE {f.where()}""").iloc[0]
+                    FROM gateway_events WHERE {f.where(p)}""", p.values).iloc[0]
 
 
 def top_values(f: Filters, dim: str, n: int = 6) -> list[str]:
     """The `n` busiest values of `dim` by requests, ignoring rows with none."""
-    k = dim_sql(dim)
+    k, p = dim_sql(dim), Params()
     return usage.q(f"""SELECT {k} AS k FROM gateway_events
-                       WHERE {f.where()} AND {k} IS NOT NULL AND {k} <> ''
-                       GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT {n}""").k.tolist()
+                       WHERE {f.where(p)} AND {k} IS NOT NULL AND {k} <> ''
+                       GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT {n}""", p.values).k.tolist()
 
 
-def _folded(dim: str, keep: list[str]) -> str:
+def _folded(dim: str, keep: list[str], p: Params) -> str:
     """SQL for the group of a row: the values in `keep`, and "Other" for the rest."""
     k = dim_sql(dim)
-    kept = ",".join(sql_str(x) for x in keep) or "''"
-    return f"CASE WHEN {k} IN ({kept}) THEN {k} ELSE 'Other' END"
+    return f"CASE WHEN {k} IN ({p.bind_all(keep or [''])}) THEN {k} ELSE 'Other' END"
 
 
-def _group(f: Filters, by: str, label: str) -> str:
+def _group(f: Filters, by: str, label: str, p: Params) -> str:
     """SQL for a chart's group: the six busiest values of `by`, the rest "Other".
 
     A rate cannot be summed after the query, so the tail is folded in SQL.
     """
-    return sql_str(label) if by == "none" else _folded(by, top_values(f, by))
+    return sql_str(label) if by == "none" else _folded(by, top_values(f, by), p)
 
 
 def _has_group(by: str) -> str:
@@ -254,22 +274,23 @@ def _has_group(by: str) -> str:
 
 def spend_by_period(f: Filters, grain: str, by: str, label: str) -> pd.DataFrame:
     """b, k, v: estimated spend per period and group. Every group is returned, not six."""
-    k = sql_str(label) if by == "none" else dim_sql(by)
+    k, p = (sql_str(label) if by == "none" else dim_sql(by)), Params()
     return usage.q(f"""SELECT date_trunc('{grain}', day)::DATE AS b, {k} AS k,
                               SUM({est_cost()}) v
                        FROM gateway_events
-                       WHERE {f.where()} AND {k} IS NOT NULL AND {k} <> ''
-                       GROUP BY 1, 2 ORDER BY 1""")
+                       WHERE {f.where(p)} AND {k} IS NOT NULL AND {k} <> ''
+                       GROUP BY 1, 2 ORDER BY 1""", p.values)
 
 
 def cache_savings_by_period(f: Filters, grain: str, by: str, label: str) -> pd.DataFrame:
     """day, k, v: what the prompt cache saved against the uncached price."""
-    k = _group(f, by, label)
+    p = Params()
+    k = _group(f, by, label, p)
     return usage.q(f"""SELECT date_trunc('{grain}', day)::DATE AS day, {k} AS k,
                               SUM({est_cost_uncached()} - {est_cost()}) v
                        FROM gateway_events
-                       WHERE {f.where()} {_has_group(by)}
-                       GROUP BY 1, 2 ORDER BY 1""")
+                       WHERE {f.where(p)} {_has_group(by)}
+                       GROUP BY 1, 2 ORDER BY 1""", p.values)
 
 
 def cache_read_share_by_period(f: Filters, grain: str, by: str, label: str) -> pd.DataFrame:
@@ -277,23 +298,25 @@ def cache_read_share_by_period(f: Filters, grain: str, by: str, label: str) -> p
 
     input_tokens already counts cache writes and reads (see usage._SHAPE).
     """
-    k = _group(f, by, label)
+    p = Params()
+    k = _group(f, by, label, p)
     return usage.q(f"""SELECT date_trunc('{grain}', day)::DATE AS day, {k} AS k,
                               100.0 * SUM(COALESCE(cache_read_tokens, 0))
                                   / NULLIF(SUM(COALESCE(input_tokens, 0)), 0) AS v
-                       FROM gateway_events WHERE {f.where()} {_has_group(by)}
-                       GROUP BY 1, 2 ORDER BY 1""")
+                       FROM gateway_events WHERE {f.where(p)} {_has_group(by)}
+                       GROUP BY 1, 2 ORDER BY 1""", p.values)
 
 
 def error_rate_by_period(f: Filters, grain: str, by: str, label: str) -> pd.DataFrame:
     """day, k, v: the percent of requests with status 400 or more."""
-    k = _group(f, by, label)
+    p = Params()
+    k = _group(f, by, label, p)
     return usage.q(f"""SELECT date_trunc('{grain}', day)::DATE AS day, {k} AS k,
                               100.0 * COUNT(*) FILTER (WHERE status_code >= 400)
                                   / COUNT(*) AS v
                        FROM gateway_events
-                       WHERE {f.where()} AND status_code IS NOT NULL {_has_group(by)}
-                       GROUP BY 1, 2 ORDER BY 1""")
+                       WHERE {f.where(p)} AND status_code IS NOT NULL {_has_group(by)}
+                       GROUP BY 1, 2 ORDER BY 1""", p.values)
 
 
 # ---- principals -------------------------------------------------------------------
@@ -312,16 +335,11 @@ def _kind_source(kind: str) -> tuple[str, str]:
     return "gateway_events", KEY_COL[kind]
 
 
-def pred(kind: str, key: str) -> str:
+def pred(kind: str, key: str, p: Params) -> str:
     """The rows of one principal, as a condition on plain gateway_events."""
     if kind == "group":
-        return f"user_guid IN (SELECT user_guid FROM user_groups WHERE group_guid = {sql_str(key)})"
-    return f"{KEY_COL[kind]} = {sql_str(key)}"
-
-
-def principal_records_sql(f: Filters, kind: str, key: str) -> str:
-    """Every record of one principal in view, uncapped (see records_sql)."""
-    return records_sql(f"{f.where()} AND {pred(kind, key)}")
+        return f"user_guid IN (SELECT user_guid FROM user_groups WHERE group_guid = {p.bind(key)})"
+    return f"{KEY_COL[kind]} = {p.bind(key)}"
 
 
 def peer_spend(f: Filters, kind: str) -> pd.DataFrame:
@@ -329,132 +347,148 @@ def peer_spend(f: Filters, kind: str) -> pd.DataFrame:
     src, key = _kind_source(kind)
     has_key = f"{key} IS NOT NULL AND CAST({key} AS VARCHAR) <> ''"
     extra = ", MAX(group_name) AS gname" if kind == "group" else ""
+    p = Params()
     return usage.q(f"""
         SELECT {key} AS k, COALESCE(SUM({est_cost()}), 0) AS spend, COUNT(*) AS requests,
                COALESCE(SUM({TOKEN_COUNT}), 0) AS tokens,
                MAX(username) AS owner, MAX(workbench_session_name) AS sname{extra}
         FROM {src}
-        WHERE {f.where()} AND {has_key}
-        GROUP BY 1""")
+        WHERE {f.where(p)} AND {has_key}
+        GROUP BY 1""", p.values)
 
 
 def peer_top_model(f: Filters, kind: str) -> pd.DataFrame:
     """k, top_model: the model each principal spent most on."""
     src, key = _kind_source(kind)
     has_key = f"{key} IS NOT NULL AND CAST({key} AS VARCHAR) <> ''"
+    p = Params()
     return usage.q(f"""
         SELECT k, arg_max(model, v) AS top_model
         FROM (SELECT {key} AS k, model, COALESCE(SUM({est_cost()}), 0) AS v
-              FROM {src} WHERE {f.where()} AND {has_key} GROUP BY 1, 2)
-        GROUP BY k""")
+              FROM {src} WHERE {f.where(p)} AND {has_key} GROUP BY 1, 2)
+        GROUP BY k""", p.values)
 
 
 def principal_spend_by_period(f: Filters, kind: str, key: str, grain: str) -> pd.DataFrame:
     """day, v: one principal's spend per day, week or month."""
+    p = Params()
     return usage.q(f"""SELECT date_trunc('{grain}', day)::DATE AS day, SUM({est_cost()}) v
-                       FROM gateway_events WHERE {f.where()} AND {pred(kind, key)}
-                       GROUP BY 1 ORDER BY 1""")
+                       FROM gateway_events WHERE {f.where(p)} AND {pred(kind, key, p)}
+                       GROUP BY 1 ORDER BY 1""", p.values)
 
 
 def principal_spend_split(f: Filters, kind: str, key: str, col: str) -> pd.DataFrame:
     """k, v, n: one principal's spend and requests by the values of `col`."""
-    k = dim_sql(col)
+    k, p = dim_sql(col), Params()
     return usage.q(f"""SELECT {k} AS k, SUM({est_cost()}) v, COUNT(*) n FROM gateway_events
-                       WHERE {f.where()} AND {pred(kind, key)} AND {k} IS NOT NULL AND {k} <> ''
-                       GROUP BY 1 ORDER BY v DESC""")
+                       WHERE {f.where(p)} AND {pred(kind, key, p)} AND {k} IS NOT NULL AND {k} <> ''
+                       GROUP BY 1 ORDER BY v DESC""", p.values)
 
 
 def user_content(f: Filters, user: str) -> pd.DataFrame:
     """content_guid, via, requests, est_spend_usd: the content a user was charged for."""
+    p = Params()
     return usage.q(f"""
         SELECT content_guid, string_agg(DISTINCT user_kind, ', ' ORDER BY user_kind) AS via,
                COUNT(*) requests, SUM({est_cost()}) est_spend_usd
-        FROM gateway_events WHERE {f.where()} AND {pred('user', user)} AND content_guid IS NOT NULL
-        GROUP BY 1 ORDER BY est_spend_usd DESC""")
+        FROM gateway_events
+        WHERE {f.where(p)} AND {pred('user', user, p)} AND content_guid IS NOT NULL
+        GROUP BY 1 ORDER BY est_spend_usd DESC""", p.values)
 
 
 def user_sessions(f: Filters, user: str) -> pd.DataFrame:
     """session, id, project, first, last, requests, est_spend_usd."""
+    p = Params()
     return usage.q(f"""
         SELECT MAX(workbench_session_name) AS session, workbench_session_id AS id,
                MAX(workbench_project_name) AS project,
                strftime(MIN(ts), '%Y-%m-%d') AS first, strftime(MAX(ts), '%Y-%m-%d') AS last,
                COUNT(*) requests, SUM({est_cost()}) est_spend_usd
         FROM gateway_events
-        WHERE {f.where()} AND {pred('user', user)} AND workbench_session_id IS NOT NULL
-        GROUP BY 2 ORDER BY est_spend_usd DESC""")
+        WHERE {f.where(p)} AND {pred('user', user, p)} AND workbench_session_id IS NOT NULL
+        GROUP BY 2 ORDER BY est_spend_usd DESC""", p.values)
 
 
 def content_users(f: Filters, guid: str) -> pd.DataFrame:
     """user, via, requests, est_spend_usd: who was charged for a content item."""
+    p = Params()
     return usage.q(f"""
         SELECT username AS user, string_agg(DISTINCT user_kind, ', ' ORDER BY user_kind) AS via,
                COUNT(*) requests, SUM({est_cost()}) est_spend_usd
-        FROM gateway_events WHERE {f.where()} AND {pred('content', guid)}
-        GROUP BY 1 ORDER BY est_spend_usd DESC""")
+        FROM gateway_events WHERE {f.where(p)} AND {pred('content', guid, p)}
+        GROUP BY 1 ORDER BY est_spend_usd DESC""", p.values)
 
 
 def content_groups(f: Filters, guid: str) -> pd.DataFrame:
     """group, users, requests, est_spend_usd: by the charged users' Connect groups."""
+    p = Params()
     return usage.q(f"""
         SELECT group_name AS "group", COUNT(DISTINCT user_guid) users,
                COUNT(*) requests, SUM({est_cost()}) est_spend_usd
         FROM gateway_events JOIN user_groups USING (user_guid)
-        WHERE {f.where()} AND {pred('content', guid)} GROUP BY 1 ORDER BY est_spend_usd DESC""")
+        WHERE {f.where(p)} AND {pred('content', guid, p)}
+        GROUP BY 1 ORDER BY est_spend_usd DESC""", p.values)
 
 
 def session_owner(session_id: str) -> str | None:
     """The username that ran a session, over all records and not only those in view."""
+    p = Params()
     return usage.scalar(
-        f"SELECT MAX(username) FROM gateway_events WHERE {pred('session', session_id)}")
+        f"SELECT MAX(username) FROM gateway_events WHERE {pred('session', session_id, p)}",
+        p.values)
 
 
 def owner_sessions(f: Filters, owner: str) -> pd.DataFrame:
     """session, id, first, last, requests, est_spend_usd: every session of one user."""
+    p = Params()
     return usage.q(f"""
         SELECT MAX(workbench_session_name) AS session, workbench_session_id AS id,
                strftime(MIN(ts), '%Y-%m-%d') AS first, strftime(MAX(ts), '%Y-%m-%d') AS last,
                COUNT(*) requests, SUM({est_cost()}) est_spend_usd
         FROM gateway_events
-        WHERE {f.where()} AND {pred('user', owner)} AND workbench_session_id IS NOT NULL
-        GROUP BY 2 ORDER BY est_spend_usd DESC""")
+        WHERE {f.where(p)} AND {pred('user', owner, p)} AND workbench_session_id IS NOT NULL
+        GROUP BY 2 ORDER BY est_spend_usd DESC""", p.values)
 
 
 def owner_projects(f: Filters, owner: str) -> pd.DataFrame:
     """project, sessions, requests, est_spend_usd: a user's Workbench projects."""
+    p = Params()
     return usage.q(f"""
         SELECT COALESCE(workbench_project_name, '(no project)') AS project,
                COUNT(DISTINCT workbench_session_id) sessions,
                COUNT(*) requests, SUM({est_cost()}) est_spend_usd
         FROM gateway_events
-        WHERE {f.where()} AND {pred('user', owner)} AND source = 'workbench'
-        GROUP BY 1 ORDER BY est_spend_usd DESC""")
+        WHERE {f.where(p)} AND {pred('user', owner, p)} AND source = 'workbench'
+        GROUP BY 1 ORDER BY est_spend_usd DESC""", p.values)
 
 
 def group_members(f: Filters, group: str) -> pd.DataFrame:
     """user, other_groups, requests, est_spend_usd: the members of a group by spend."""
+    p = Params()
     return usage.q(f"""
         SELECT a.username AS user, o.other_groups, a.requests, a.est_spend_usd
         FROM (SELECT user_guid, MAX(username) username, COUNT(*) requests,
                      SUM({est_cost()}) est_spend_usd
-              FROM gateway_events WHERE {f.where()} AND {pred('group', group)} GROUP BY 1) a
+              FROM gateway_events WHERE {f.where(p)} AND {pred('group', group, p)} GROUP BY 1) a
         LEFT JOIN (SELECT user_guid, string_agg(group_name, ', ' ORDER BY group_name) other_groups
-                   FROM user_groups WHERE group_guid <> {sql_str(group)} GROUP BY 1) o
-        USING (user_guid) ORDER BY a.est_spend_usd DESC""")
+                   FROM user_groups WHERE group_guid <> {p.bind(group)} GROUP BY 1) o
+        USING (user_guid) ORDER BY a.est_spend_usd DESC""", p.values)
 
 
 def group_overlap(f: Filters, group: str) -> pd.DataFrame:
     """group, shared_members, requests, est_spend_usd: the other groups its members are in."""
+    p = Params()
     return usage.q(f"""
         SELECT group_name AS "group", COUNT(DISTINCT user_guid) shared_members,
                COUNT(*) requests, SUM({est_cost()}) est_spend_usd
         FROM gateway_events JOIN user_groups USING (user_guid)
-        WHERE {f.where()} AND {pred('group', group)} AND group_guid <> {sql_str(group)}
-        GROUP BY 1 ORDER BY est_spend_usd DESC""")
+        WHERE {f.where(p)} AND {pred('group', group, p)} AND group_guid <> {p.bind(group)}
+        GROUP BY 1 ORDER BY est_spend_usd DESC""", p.values)
 
 
 def principal_conversations(f: Filters, kind: str, key: str) -> pd.DataFrame:
     """One row per conversation of a principal, with its cost, cache misses and main model."""
+    p = Params()
     return usage.q(f"""
         WITH ev AS (
             SELECT *, {est_cost()} AS cost,
@@ -462,7 +496,7 @@ def principal_conversations(f: Filters, kind: str, key: str) -> pd.DataFrame:
                                            ORDER BY ts, response_id) AS prev_input,
                    MAX(cache_read_tokens) OVER (PARTITION BY conversation_id) AS cache_used
             FROM gateway_events
-            WHERE {f.where()} AND {pred(kind, key)} AND conversation_id IS NOT NULL)
+            WHERE {f.where(p)} AND {pred(kind, key, p)} AND conversation_id IS NOT NULL)
         SELECT conversation_id AS conversation, MIN(ts) AS started,
                date_diff('second', MIN(ts), MAX(ts)) / 60.0 AS minutes,
                COUNT(*) AS turns, SUM(cost) AS est,
@@ -482,4 +516,4 @@ def principal_conversations(f: Filters, kind: str, key: str) -> pd.DataFrame:
                arg_max(tool, cost) FILTER (WHERE tool IS NOT NULL) AS main_tool,
                MAX(username) AS who, MAX(content_guid) AS content
         FROM ev
-        GROUP BY 1 ORDER BY est DESC""")
+        GROUP BY 1 ORDER BY est DESC""", p.values)

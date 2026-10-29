@@ -19,6 +19,7 @@ from shiny import reactive, ui
 import pricing
 import principals
 import queries
+from conftest import viewed
 from filters import Filters
 from pages import adoption, overview, raw_data
 from pages.context import PageContext
@@ -51,11 +52,13 @@ def make_ctx(f):
 
 
 def test_peers_rank_and_flag_outliers(loaded, f):
-    w, cost = f.where(), pricing.est_cost()
+    where, params = viewed(f)
+    cost = pricing.est_cost()
     users = principals.peers_df(f, "user")
     assert users.spend.tolist() == sorted(users.spend, reverse=True)
     assert users.spend.sum() == pytest.approx(loaded.scalar(
-        f"SELECT SUM({cost}) FROM gateway_events WHERE {w} AND username IS NOT NULL"))
+        f"SELECT SUM({cost}) FROM gateway_events WHERE {where} AND username IS NOT NULL",
+        params))
     assert users.label.is_unique
     # The fake Connect has a runaway content item: the top spender, and flagged.
     content = principals.peers_df(f, "content")
@@ -122,8 +125,8 @@ def test_principals_exports_use_raw_data_sql(loaded, f, make_ctx):
     with reactive.isolate():
         # The uncapped export is the Raw Data builder over this principal's rows.
         sql = sql_exports["pf_records"][0]()
-        assert sql == queries.records_sql(f"{f.where()} AND {queries.pred('user', user)}")
-        records = loaded.q(sql)
+        assert sql == queries.principal_records_query(f, "user", user)
+        records = loaded.q(*sql)
         content = exports["pf_rel_0"][0]()
     assert len(records) == peers.requests.iloc[0]
     assert set(records.username) == {user}
@@ -168,8 +171,10 @@ def test_adoption_export_counts_active_users(loaded, f, make_ctx):
 
 
 def test_adoption_narrowed_to_one_user(loaded, f, make_ctx):
-    user = loaded.q(f"""SELECT username FROM gateway_events WHERE {f.where()}
-                        AND username IS NOT NULL GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1""")
+    where, params = viewed(f)
+    user = loaded.q(f"""SELECT username FROM gateway_events WHERE {where}
+                        AND username IS NOT NULL GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1""",
+                    params)
     df, _ = run_export(make_ctx, adoption, "adoption", adoption_kind="user",
                        tool_grain="week", narrowed=replace(f, users=(user.username[0],)))
     assert df.monthly_active_users.max() == 1
@@ -202,27 +207,25 @@ def test_raw_data_records_follow_the_filter(loaded, f, make_ctx):
     def export(narrowed: Filters | None = None) -> pd.DataFrame:
         sql_fn, _ = start(narrowed)
         with reactive.isolate():
-            return loaded.q(sql_fn())
+            return loaded.q(*sql_fn())
 
     _, filename = start()
     assert filename == "gateway_records.csv"
     everything = export()
-    assert len(everything) == loaded.scalar(
-        f"SELECT COUNT(*) FROM gateway_events WHERE {f.where()}")
+    assert len(everything) == queries.record_count(f)
     assert everything.ts.is_monotonic_decreasing
     assert {"origin", "tool", "username", "authenticated_username", "viewer_username",
             "content_owner_username", "via", "est_cost_usd", "request_metadata"} <= set(
         everything.columns)
     assert everything.est_cost_usd.sum() == pytest.approx(
-        loaded.scalar(f"SELECT SUM({pricing.est_cost()}) FROM gateway_events "
-                      f"WHERE {f.where()}"), abs=0.1)  # each row is rounded to 4 places
+        queries.total_spend(f), abs=0.1)  # each row is rounded to 4 places
     assert everything.response_id.is_unique  # no row is repeated by the grid's joins
 
     group = loaded.q("SELECT group_guid FROM user_groups ORDER BY 1 LIMIT 1").group_guid[0]
-    members = set(loaded.q(f"""SELECT DISTINCT username FROM gateway_events WHERE user_guid IN
-        (SELECT user_guid FROM user_groups WHERE group_guid = '{group}')""").username)
+    members = set(loaded.q("""SELECT DISTINCT username FROM gateway_events WHERE user_guid IN
+        (SELECT user_guid FROM user_groups WHERE group_guid = $g)""", {"g": group}).username)
     narrowed = export(replace(f, groups=(group,)))
     assert set(narrowed.username) <= members
     assert 0 < len(narrowed) < len(everything)
-    # The builder principals reuse takes any predicate, and caps nothing itself.
-    assert "LIMIT" not in queries.records_sql("TRUE")
+    # The export caps nothing itself.
+    assert "LIMIT" not in queries.records_query(f).sql

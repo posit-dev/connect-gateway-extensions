@@ -27,7 +27,7 @@ import principals
 import queries
 import usage
 from conftest import WINDOW_FROM, WINDOW_TO
-from filters import Filters
+from filters import Filters, Params
 
 NOBODY = {"authenticated_username": None, "authenticated_user_guid": None,
           "authenticated_email": None}
@@ -139,9 +139,13 @@ def test_top_values_ranks_by_requests_and_skips_nulls(world):
 
 
 def test_folded_group_names_the_rest_other():
-    sql = queries._folded("model", ["a", "it's"])
-    assert sql == "CASE WHEN model IN ('a','it''s') THEN model ELSE 'Other' END"
-    assert "IN ('')" in queries._folded("model", [])  # an empty list matches nothing
+    p = Params()
+    sql = queries._folded("model", ["a", "it's"], p)
+    assert sql == "CASE WHEN model IN ($p0, $p1) THEN model ELSE 'Other' END"
+    assert p.values == {"p0": "a", "p1": "it's"}
+    empty = Params()
+    queries._folded("model", [], empty)
+    assert empty.values == {"p0": ""}  # an empty list matches nothing
 
 
 def test_period_queries_group_and_label(world):
@@ -190,11 +194,32 @@ def test_records_are_newest_first_and_limited(world):
     assert len(got) == 2
     assert got.ts.is_monotonic_decreasing
     assert got.content_name.dropna().empty  # c1 is on the 11th, outside the newest two
-    assert "LIMIT" not in queries.records_sql("TRUE")
-    everything = usage.q(queries.records_sql(ALL.where()))
+    assert "LIMIT" not in queries.records_query(ALL).sql
+    assert "LIMIT 2" in queries.records_query(ALL, 2).sql
+    everything = usage.q(*queries.records_query(ALL))
     assert len(everything) == 5
     assert everything.content_name.dropna().tolist() == ["Report"]
     assert everything.est_cost_usd.sum() == pytest.approx(queries.total_spend(ALL), abs=1e-3)
+
+
+def test_hostile_filter_values_match_nothing_and_break_nothing(world):
+    hostile = "alice') OR ('1'='1"
+    f = replace(ALL, users=(hostile,), sessions=(hostile,), meta=(json.dumps([hostile, hostile]),))
+    assert queries.record_count(f) == 0
+    assert queries.record_count(replace(ALL, users=(hostile,))) == 0
+    assert queries.total_spend(f) == 0
+    # The same text as a principal's key, and as a value to fold into "Other".
+    assert queries.principal_spend_by_period(ALL, "user", hostile, "day").empty
+    assert not queries.active_by_bucket(ALL, "username", "model", "day", [hostile]).empty
+
+
+def test_csv_export_binds_the_same_values(world):
+    path = usage.export_csv(queries.records_query(replace(ALL, users=("bob",))))
+    try:
+        got = pd.read_csv(path)
+    finally:
+        path.unlink()
+    assert set(got.username) == {"bob"} and len(got) == 2
 
 
 # ---- principals -------------------------------------------------------------------
@@ -216,7 +241,9 @@ def test_peer_spend_and_top_model(world):
 
 def test_pred_selects_one_principal(world):
     def count(kind, key):
-        return usage.scalar(f"SELECT COUNT(*) FROM gateway_events WHERE {queries.pred(kind, key)}")
+        p = Params()
+        return usage.scalar(
+            f"SELECT COUNT(*) FROM gateway_events WHERE {queries.pred(kind, key, p)}", p.values)
 
     assert count("user", "alice") == 2
     assert count("content", "c1") == 1
@@ -226,10 +253,11 @@ def test_pred_selects_one_principal(world):
 
 
 def test_principal_records_are_that_principals_only(world):
-    sql = queries.principal_records_sql(ALL, "user", "alice")
-    assert set(usage.q(sql).username) == {"alice"}
-    narrowed = queries.principal_records_sql(replace(ALL, end=date(2026, 9, 10)), "user", "alice")
-    assert len(usage.q(narrowed)) == 1
+    query = queries.principal_records_query(ALL, "user", "alice")
+    assert set(usage.q(*query).username) == {"alice"}
+    assert "alice" not in query.sql  # the key is bound, not written into the SQL
+    narrowed = queries.principal_records_query(replace(ALL, end=date(2026, 9, 10)), "user", "alice")
+    assert len(usage.q(*narrowed)) == 1
 
 
 def test_principal_spend_by_period_and_split(world):

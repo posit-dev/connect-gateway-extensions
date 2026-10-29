@@ -4,14 +4,44 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time
+from typing import Any, NamedTuple, Sequence
 
 # SQL for a row's token count: input plus output.
 TOKEN_COUNT = "(input_tokens + output_tokens)"
 
 
 def sql_str(x: str) -> str:
+    """A SQL string literal, for text the app itself wrote (never for a value from the data)."""
     return "'" + str(x).replace("'", "''") + "'"
+
+
+class Params:
+    """The values bound into one query.
+
+    `bind` returns the name to write in the SQL, so a value from the data or
+    from a filter pick never becomes part of the SQL text. DuckDB rejects a
+    value that no `$name` in the SQL refers to, so bind only what the query uses.
+    """
+
+    def __init__(self) -> None:
+        self.values: dict[str, Any] = {}
+
+    def bind(self, value: Any) -> str:
+        name = f"p{len(self.values)}"
+        self.values[name] = value
+        return f"${name}"
+
+    def bind_all(self, values: Sequence[Any]) -> str:
+        """Comma-separated names for a list of values, for use inside IN (...)."""
+        return ", ".join(self.bind(v) for v in values)
+
+
+class Query(NamedTuple):
+    """SQL text with the values its `$name`s stand for."""
+
+    sql: str
+    params: dict[str, Any]
 
 
 # What a chart calls a row whose origin or harness is NULL. Connect sets origin
@@ -30,14 +60,14 @@ def dim_sql(dim: str) -> str:
     return f"COALESCE({dim}, {sql_str(label)})" if label else dim
 
 
-def meta_expr(key: str) -> str:
+def meta_expr(key: str, p: Params) -> str:
     """SQL for one metadata key's value, as text."""
     path = '$."' + key.replace('"', '\\"') + '"'
-    return f"json_extract_string(request_metadata, {sql_str(path)})"
+    return f"json_extract_string(request_metadata, {p.bind(path)})"
 
 
-def sql_in(col: str, vals) -> str:
-    return f"{col} IN ({','.join(sql_str(x) for x in vals)})"
+def sql_in(col: str, vals: Sequence[str], p: Params) -> str:
+    return f"{col} IN ({p.bind_all(vals)})"
 
 
 @dataclass(frozen=True)
@@ -59,25 +89,28 @@ class Filters:
     meta: tuple[str, ...] = ()
     mode: str = "dark"
 
-    def where(self, extra: str = "") -> str:
-        """The gateway_events predicate for this selection, then `extra` verbatim."""
+    def where(self, p: Params, extra: str = "") -> str:
+        """The gateway_events predicate for this selection, then `extra` verbatim.
+
+        Values are bound into `p`; `extra` is SQL text the caller wrote.
+        """
         conds = [
-            f"ts >= TIMESTAMP '{self.start} 00:00:00'",
-            f"ts <= TIMESTAMP '{self.end} 23:59:59.999'",
+            f"ts >= {p.bind(datetime.combine(self.start, time.min))}",
+            f"ts <= {p.bind(datetime.combine(self.end, time(23, 59, 59, 999000)))}",
         ]
         if self.users and set(self.users) != set(self.all_users):
-            conds.append(sql_in("username", self.users))
+            conds.append(sql_in("username", self.users, p))
         # Applies to every origin. A Workbench call has a null content_guid, so
         # picking content naturally leaves Workbench out of the view.
         if self.contents and set(self.contents) != set(self.all_contents):
-            conds.append(sql_in("content_guid", self.contents))
+            conds.append(sql_in("content_guid", self.contents, p))
         if self.sessions:
-            conds.append(sql_in("workbench_session_id", self.sessions))
+            conds.append(sql_in("workbench_session_id", self.sessions, p))
         # A Connect group is its members: a request counts when its user is in
         # any of the picked groups.
         if self.groups:
             conds.append("user_guid IN (SELECT user_guid FROM user_groups WHERE "
-                         f"{sql_in('group_guid', self.groups)})")
+                         f"{sql_in('group_guid', self.groups, p)})")
         # Values of one key are alternatives; separate keys all have to match.
         by_key: dict[str, list[str]] = {}
         for pick in self.meta:
@@ -87,5 +120,5 @@ class Filters:
                 continue
             by_key.setdefault(k, []).append(v)
         for k, vals in by_key.items():
-            conds.append(f"{meta_expr(k)} IN ({','.join(sql_str(v) for v in vals)})")
+            conds.append(f"{meta_expr(k, p)} IN ({p.bind_all(vals)})")
         return " AND ".join(conds) + extra

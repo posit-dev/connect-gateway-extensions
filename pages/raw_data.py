@@ -4,6 +4,7 @@ import pandas as pd
 from shiny import reactive, render, ui
 
 import queries
+from filters import Query
 from pages.context import PageContext
 from ui_shell import page_header, table_header
 
@@ -36,9 +37,9 @@ def server(input, ctx: PageContext):
     def records_shown() -> pd.DataFrame:
         return queries.records(flt(), RECORDS_GRID_MAX)
 
-    def records_sql_all() -> str:
+    def records_query_all() -> Query:
         """The export is every filtered row — the table only shows the head."""
-        return queries.records_sql(flt().where())
+        return queries.records_query(flt())
 
     @render.data_frame
     def records_table():
@@ -59,4 +60,4 @@ def server(input, ctx: PageContext):
             return ui.span(id="records-capped", style="display:none")
         return None
 
-    ctx.register_sql_export("records", records_sql_all, "gateway_records.csv")
+    ctx.register_sql_export("records", records_query_all, "gateway_records.csv")

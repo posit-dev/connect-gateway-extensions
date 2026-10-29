@@ -527,7 +527,7 @@ def server(input, ctx: PageContext):
     # Every record of the picked principal, uncapped: DuckDB writes the file.
     register_sql_export(
         "pf_records",
-        lambda: queries.principal_records_sql(ent().f, ent().kind, ent().key),
+        lambda: queries.principal_records_query(ent().f, ent().kind, ent().key),
         "profile_records.csv",
     )
 
