@@ -23,8 +23,7 @@ SESSION_TOKEN_HEADER = "posit-connect-user-session-token"
 
 NEEDS_INTEGRATION = (
     "This dashboard needs a Connect API integration to check who is viewing it. "
-    "An administrator can add one on the Integration Settings page, with Max Role "
-    "set to Administrator, and then associate it with this content."
+    "An administrator can add one on the Integration Settings page for this app."
 )
 NOT_ADMIN = "Only Connect administrators can view this dashboard."
 

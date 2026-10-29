@@ -178,10 +178,28 @@ def with_clear(name: str, control: ui.Tag) -> ui.Tag:
     )
 
 
+def denied_page(reason: str) -> ui.Tag:
+    """Why this visitor sees no dashboard, in the dashboard's own look."""
+    return ui.page_fluid(
+        ui.head_content(
+            ui.tags.script("document.documentElement.setAttribute('data-bs-theme', 'dark');"),
+            ui.include_css(Path(__file__).parent / "www" / "styles.css"),
+            ui.include_css(Path(__file__).parent / "www" / "shell.css"),
+        ),
+        ui.div(
+            ui.div(brand(), class_="denied-brand"),
+            ui.h4("Access denied"),
+            ui.p(reason),
+            class_="denied-card",
+        ),
+        class_="denied-page",
+    )
+
+
 def app_ui(request: Request | None):
     reason = access.denial(request.headers) if request else None
     if reason:
-        return ui.page_fluid(ui.h4("Access denied"), ui.p(reason))
+        return denied_page(reason)
     return _shell(
         overview.panel(),
         principals.panel(),

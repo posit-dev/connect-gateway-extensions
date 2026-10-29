@@ -295,3 +295,16 @@ body.drawer-open .filter-drawer {
   background: var(--accent); animation: first-load-slide 1.2s ease-in-out infinite;
 }
 @keyframes first-load-slide { from { margin-left: -40%; } to { margin-left: 100%; } }
+
+/* Shown instead of the dashboard when the visitor check fails. */
+.denied-page {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: var(--page); padding: 24px;
+}
+.denied-card {
+  max-width: 480px; padding: 28px 32px; background: var(--surface-1);
+  border: 1px solid var(--hairline); border-radius: var(--radius);
+}
+.denied-brand { margin-bottom: 20px; }
+.denied-card h4 { font-size: 1.1rem; font-weight: 600; color: var(--text-primary); }
+.denied-card p { margin: 0; color: var(--text-secondary); line-height: 1.5; }
