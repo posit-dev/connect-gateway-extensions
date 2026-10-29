@@ -1,6 +1,7 @@
 {
-  "include": ["*.py", "pages", "tests", "demo"],
+  "include": ["extensions", "tests", "demo"],
   "exclude": [".venv", "rsconnect-python", "**/__pycache__", ".gateway-cache"],
+  "extraPaths": ["extensions/gateway-usage-dashboard"],
   "venvPath": ".",
   "venv": ".venv",
   "pythonVersion": "3.13",

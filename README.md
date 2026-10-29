@@ -18,6 +18,25 @@ from scratch every 24 hours. A Parquet snapshot in `.gateway-cache/` lets a
 restarted process reuse its existing rows, although catching up still requires
 a full-window export from Connect.
 
+## Install from the Gallery
+
+On a Connect server with `[Gateway] Enabled = true`, the dashboard appears in
+the Gallery under "LLM Gateway Extensions". Only administrators see it. It
+needs Connect 2026.11.0 or later.
+
+Connect adds the feed by default. If your `[GalleryFeed]` settings replace the
+defaults, add it by hand:
+
+```toml
+[GalleryFeed "gateway"]
+Name = "LLM Gateway Extensions"
+URL = "https://raw.githubusercontent.com/posit-dev/connect-gateway-extensions/refs/heads/main/extensions.json"
+```
+
+The app lives in `extensions/gateway-usage-dashboard/`. Its `manifest.json`
+carries the Gallery metadata. A version bump there, merged to `main`, publishes
+a release.
+
 ## Configuration
 
 The app needs two environment variables:
@@ -122,7 +141,7 @@ Importing `usage` does nothing; `app.py` runs the first `usage.load()`.
 
 ## Architecture
 
-`app:app` is the entrypoint. `app.py` is the shell and the wiring. It builds
+The paths below are in `extensions/gateway-usage-dashboard/`. `app:app` is the entrypoint. `app.py` is the shell and the wiring. It builds
 the page frame and the filter drawer, keeps the state that every page shares,
 and starts each page's server. The shared state is the loaded-data catalog, the
 filter dict `flt()`, the data refresh, bookmarks and URL query state, the
@@ -168,7 +187,7 @@ Then redeploy new code to the same content item. To deploy to any other server
 with an API key, run `just deploy <connect-url> <api-key>`.
 
 ```bash
-rsconnect deploy shiny . --server https://connect.agave.pwb.posit.it \
+rsconnect deploy shiny extensions/gateway-usage-dashboard --server https://connect.agave.pwb.posit.it \
   --app-id a9aa52e2-3b47-4d39-ad15-e4dcbe509b72 --entrypoint app:app
 ```
 

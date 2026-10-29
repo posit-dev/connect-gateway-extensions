@@ -1,5 +1,5 @@
 # Development tools, on top of the app's own requirements: `just setup-dev`.
--r requirements.txt
+-r extensions/gateway-usage-dashboard/requirements.txt
 
 # Tests: `just test`, configured in pytest.ini.
 pytest==9.1.1

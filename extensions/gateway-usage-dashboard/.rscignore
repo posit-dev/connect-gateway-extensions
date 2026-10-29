@@ -5,9 +5,4 @@ __pycache__/
 *.py[cod]
 .DS_Store
 rsconnect-python/
-manifest.json
 .gateway-cache/
-dev-requirements.txt
-pyrightconfig.json
-pytest.ini
-tests/

@@ -1,0 +1,96 @@
+{
+  "extension": {
+    "name": "gateway-usage-dashboard",
+    "title": "Posit AI Gateway Usage Dashboard",
+    "description": "Explore how your organization uses the Posit AI Gateway: spend, tokens, adoption, conversations and per-user attribution across models and clients.",
+    "homepage": "https://github.com/posit-dev/ai-usage-dashboard/tree/main/extensions/gateway-usage-dashboard",
+    "category": "gateway",
+    "tags": [
+      "LLM Gateway"
+    ],
+    "minimumConnectVersion": "2026.11.0",
+    "adminOnly": true,
+    "version": "0.0.0"
+  },
+  "version": 1,
+  "locale": "en_US.UTF-8",
+  "metadata": {
+    "appmode": "python-shiny",
+    "entrypoint": "app:app"
+  },
+  "python": {
+    "version": "3.13.0",
+    "package_manager": {
+      "name": "pip",
+      "version": "26.0.1",
+      "package_file": "requirements.txt"
+    }
+  },
+  "environment": {
+    "python": {
+      "requires": "~=3.13.0"
+    }
+  },
+  "files": {
+    "requirements.txt": {
+      "checksum": "38d8e31030230e7a977801e5c1a34ed5"
+    },
+    ".python-version": {
+      "checksum": "789ee353b44223a8ed8031aa190631dd"
+    },
+    ".rscignore": {
+      "checksum": "267a77458cc67f22bf2b6a3722c189c5"
+    },
+    "app.py": {
+      "checksum": "a1c7929b6a1b80b2208ca1e88b7f681b"
+    },
+    "conversations.py": {
+      "checksum": "2c2fbb2014ac8e9578d1a3fe2d50d095"
+    },
+    "filters.py": {
+      "checksum": "d994f3c74cc04da4e43cb81c43a271c5"
+    },
+    "pages/__init__.py": {
+      "checksum": "75f1d4c06fbdc21e795501b0116bbb71"
+    },
+    "pages/adoption.py": {
+      "checksum": "ecd5665dd8a0f8be65f347c37006bb0b"
+    },
+    "pages/context.py": {
+      "checksum": "f47aff12e117e85c8c2461ab5ee6fa82"
+    },
+    "pages/overview.py": {
+      "checksum": "4a6ecf24fdaea97bba307364d2e58159"
+    },
+    "pages/raw_data.py": {
+      "checksum": "826e64ed44f1fe3cdbf0bcaa558d3c8e"
+    },
+    "pricing.py": {
+      "checksum": "69ed2f2e840ec28c44e1c941b152c0ce"
+    },
+    "principals.py": {
+      "checksum": "687b471eefdb3d1ee3cfc0f321257c21"
+    },
+    "theme.py": {
+      "checksum": "da9d7a45976852550f6e46a8bafffc8e"
+    },
+    "ui_shell.py": {
+      "checksum": "5c90dc083b4fe68f96a7e68cdca62e39"
+    },
+    "usage.py": {
+      "checksum": "2e08b57c76c341ecf0de053f73e94d8f"
+    },
+    "www/Posit-Logos-2024_horiz-full-color.svg": {
+      "checksum": "c15fbeaf9ba362c71c089d9663b9dfc2"
+    },
+    "www/favicon.svg": {
+      "checksum": "5ffdaa38ae5a0738cf517148cdd88ea3"
+    },
+    "www/shell.css": {
+      "checksum": "5159589255c05010efd80ca5c9eb8c2f"
+    },
+    "www/styles.css": {
+      "checksum": "fe248773ac5ce899a4a9f0214c337229"
+    }
+  }
+}
