@@ -11,7 +11,7 @@ in a row resolves through the same API the dashboard calls. Calls are shaped lik
 the mock's (conversations, prompt caching, Workbench sessions, runaway agents);
 see demo/fake_connect.py.
 
-    python demo/backfill_agave.py --out /tmp/backfill
+    python demo/backfill_connect.py --out /tmp/backfill --integration <guid>
     tar -C /tmp/backfill -cf - . | kubectl -n posit-team exec -i <pod> -c connect -- \
         tar -C /var/lib/rstudio-connect/gateway -xf -
 
@@ -33,29 +33,22 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, str(Path(__file__).parent))
 import fake_connect as fc  # noqa: E402  (its pick_client and Workbench helpers)
 
-# The Anthropic integrations Agave's real traffic uses, and how often each is hit.
-INTEGRATIONS = [
-    ("b28aa133-479c-4787-8750-4df4c8276d2f", 0.7),
-    ("5d2c2218-383e-4873-9807-5d484f500cc9", 0.15),
-    ("3286bb58-053b-4aea-ba1c-c598104b6858", 0.1),
-    ("e2f91662-8f81-4439-8460-897fb47d58df", 0.05),
-]
-# Models people pick in an IDE or CLI, and the cheap ones content uses. All are in
-# Agave's price catalog. Where the catalog also lists a dated name, the response
-# model carries it.
+# Models people pick in an IDE or CLI, and the cheap ones content uses. All need
+# to be in the server's price catalog. Where the catalog also lists a dated name,
+# the response model carries it.
 IDE_MODELS = [
-    ("claude-sonnet-5", 0.34), ("claude-opus-5", 0.15), ("claude-opus-4-8", 0.12),
-    ("claude-sonnet-4-6", 0.12), ("claude-opus-4-7", 0.08), ("claude-opus-4-6", 0.06),
-    ("claude-haiku-4-5", 0.06), ("claude-fable-5", 0.04), ("claude-mythos-5", 0.03),
+    ("claude-sonnet-4-5", 0.45), ("claude-opus-4-5", 0.2), ("claude-opus-4-1", 0.15),
+    ("claude-sonnet-4-20250514", 0.1), ("claude-haiku-4-5", 0.1),
 ]
 CONTENT_MODELS = [
     ("claude-haiku-4-5", 0.5), ("claude-haiku-4-5-20251001", 0.2),
-    ("claude-sonnet-5", 0.2), ("claude-sonnet-4-6", 0.1),
+    ("claude-sonnet-4-5", 0.2), ("claude-sonnet-4-20250514", 0.1),
 ]
 DATED = {
     "claude-haiku-4-5": "claude-haiku-4-5-20251001",
-    "claude-opus-4-7": "claude-opus-4-7-20260416",
-    "claude-opus-4-6": "claude-opus-4-6-20260205",
+    "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
+    "claude-opus-4-5": "claude-opus-4-5-20251101",
+    "claude-opus-4-1": "claude-opus-4-1-20250805",
 }
 # Content that can call a model while someone uses it, not static documents.
 LIVE_MODES = {"python-shiny", "shiny", "python-fastapi", "python-streamlit", "jupyter-voila", "api"}
@@ -63,7 +56,7 @@ LIVE_MODES = {"python-shiny", "shiny", "python-fastapi", "python-streamlit", "ju
 SKIP_TITLES = {"Posit Team AI Usage Dashboard"}
 CHAT_WORDS = ("chat", "mcp", "assistant")
 # Accounts that act for no one.
-SKIP_USERS = {"connect-service-user@posit.co"}
+SKIP_USERS = {"connect-service-user"}
 # The gateway writes a record when a call finishes. A few arrive much later.
 LATE_INGEST = 0.005
 
@@ -92,8 +85,8 @@ def pick(rnd: random.Random, options: list[tuple[str, float]]) -> str:
     return rnd.choices([o[0] for o in options], [o[1] for o in options])[0]
 
 
-def build(users: list[dict], content: list[dict], rows: int, days: int, node: str,
-          seed: int, now: datetime) -> list[dict]:
+def build(users: list[dict], content: list[dict], integrations: list[str], rows: int,
+          days: int, node: str, seed: int, now: datetime) -> list[dict]:
     rnd = random.Random(seed)
     random.seed(seed)  # fake_connect.pick_client draws from the global generator
     by_guid = {u["guid"]: u for u in users}
@@ -147,7 +140,7 @@ def build(users: list[dict], content: list[dict], rows: int, days: int, node: st
         else:
             turns, gap = max(1, int(rnd.expovariate(1 / (3 if c else 7))) + 1), (15, 240)
         model = pick(rnd, CONTENT_MODELS if c else IDE_MODELS)
-        integration = pick(rnd, INTEGRATIONS)
+        integration = rnd.choice(integrations)
         owner = by_guid[c["owner_guid"]] if c else None
         # Most content shows who is using it. Some runs with no viewer, as a
         # scheduled job would.
@@ -237,7 +230,9 @@ def write(rows: list[dict], out: Path, node: str) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--node", default="agave-site-connect-backfill")
+    ap.add_argument("--integration", action="append", required=True,
+                    help="an Anthropic integration GUID on the server; repeat for several")
+    ap.add_argument("--node", default="connect-backfill")
     ap.add_argument("--rows", type=int, default=120_000)
     ap.add_argument("--days", type=int, default=90)
     ap.add_argument("--seed", type=int, default=20261023)
@@ -249,7 +244,7 @@ def main() -> None:
         if not u["locked"] and u["username"] not in SKIP_USERS
     ]
     content = get_all(server, key, "content")
-    rows = build(users, content, a.rows, a.days, a.node, a.seed, datetime.now(timezone.utc))
+    rows = build(users, content, a.integration, a.rows, a.days, a.node, a.seed, datetime.now(timezone.utc))
     files = write(rows, a.out, a.node)
     print(f"{len(rows)} rows, {files} files, {len(users)} users, {len(content)} content items")
 

@@ -33,7 +33,7 @@ def brand() -> ui.Tag:
     svg = re.sub(r"cls-(\d+)", r"posit-logo-\1", LOGO.read_text().split("?>", 1)[-1])
     return ui.span(
         ui.span(ui.HTML(svg), class_="brand-logo", aria_hidden="true"),
-        "Posit Team Gateway AI Usage",
+        "Posit AI Gateway Usage",
         class_="brand",
     )
 
@@ -234,6 +234,6 @@ def _shell(
             class_="app-shell",
         ),
         class_="p-0",
-        title="Posit Team Gateway AI Usage",
+        title="Posit AI Gateway Usage",
     )
 

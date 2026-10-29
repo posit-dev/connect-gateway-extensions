@@ -11,10 +11,16 @@ default:
     @just --list
 
 # Create .venv and install the app's requirements.
-setup: (_install "requirements.txt")
+setup: (_install "extensions/gateway-usage-dashboard/requirements.txt")
 
 # Create .venv with the app's requirements plus the development tools.
 setup-dev: (_install "dev-requirements.txt")
+
+# Re-resolve the app's requirements.txt from requirements.in. It pins every
+# package, for each Python version from 3.10 up, so a deploy installs what the
+# tests ran on. Needs uv.
+lock:
+    cd extensions/gateway-usage-dashboard && uv pip compile requirements.in --universal --python-version 3.10 -o requirements.txt
 
 # Install a requirements file into .venv, creating it if missing. Uses uv when it
 # is on PATH: a venv uv made has no pip, so `.venv/bin/pip` would not exist.
@@ -112,15 +118,11 @@ mock:
 
 # Deploy to a Connect server: `just deploy <url> <api-key>`, defaulting to the environment.
 deploy server=env_var_or_default("CONNECT_SERVER", "") key=env_var_or_default("CONNECT_API_KEY", ""):
-    @rsconnect deploy shiny . --server "{{server}}" --api-key "{{key}}" \
+    @rsconnect deploy shiny extensions/gateway-usage-dashboard --server "{{server}}" --api-key "{{key}}" \
         --title "Posit Team AI Usage Dashboard" --entrypoint app:app \
-        --exclude '.venv/*' --exclude 'demo/*' --exclude '__pycache__/*' \
-        --exclude 'rsconnect-python/*' --exclude 'justfile' \
-        --exclude 'dev-requirements.txt' --exclude 'pyrightconfig.json' \
-        --exclude 'pytest.ini' --exclude 'tests/*' \
-        --exclude '.gateway-cache/*'
+        --exclude '__pycache__/*' --exclude '.gateway-cache/*'
 
 # The one way the app starts. Do not add mode-specific settings here.
 _app server key:
     @CONNECT_SERVER="{{server}}" CONNECT_API_KEY="{{key}}" \
-        .venv/bin/shiny run app:app --port {{port}}
+        .venv/bin/shiny run app:app --app-dir extensions/gateway-usage-dashboard --port {{port}}

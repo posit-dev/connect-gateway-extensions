@@ -12,7 +12,7 @@ import urllib.request
 
 import pytest
 
-from conftest import ROOT, _free_port
+from conftest import APP, _free_port
 
 
 def test_ui_has_every_page_and_output(loaded):
@@ -42,7 +42,7 @@ def test_shiny_run_serves_page_and_session(fake_connect, tmp_path):
     port = _free_port()
     server = subprocess.Popen(
         [sys.executable, "-m", "shiny", "run", "app:app", "--port", str(port)],
-        cwd=ROOT, env={**os.environ, "GATEWAY_CACHE_DIR": str(tmp_path)},
+        cwd=APP, env={**os.environ, "GATEWAY_CACHE_DIR": str(tmp_path)},
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
     assert server.stderr is not None

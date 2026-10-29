@@ -100,8 +100,8 @@ CACHE_TTL = 300
 _TEAMS = ["data-science", "platform", "analytics", "ml-research", "support-eng"]
 _SESSION_KINDS = ["RStudio Pro Session", "Positron Pro Session", "VS Code Session"]
 MODELS = [
-    ("anthropic", "claude-opus-4-8-20260101", 0.15),
-    ("anthropic", "claude-sonnet-4-6-20251101", 0.45),
+    ("anthropic", "claude-opus-4-1-20250805", 0.15),
+    ("anthropic", "claude-sonnet-4-5-20250929", 0.45),
     ("anthropic", "claude-haiku-4-5-20251001", 0.2),
     ("bedrock", "us.anthropic.claude-sonnet-4-5-20250929-v1:0", 0.15),
     ("openai", "gpt-5", 0.05),
@@ -368,6 +368,8 @@ def build_parquet() -> bytes:
     from where Connect files a record: its ingest day and its node.
     """
     df = make_rows()
+    if df.columns.empty:  # FAKE_ROWS=0: DuckDB needs one column to read from
+        df = pd.DataFrame({"start_time": pd.Series([], dtype="datetime64[ns, UTC]")})
     derived = {
         "date": "strftime(ingest_time AT TIME ZONE 'UTC', '%Y-%m-%d')",
         "node": "node_name",

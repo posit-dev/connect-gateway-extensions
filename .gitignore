@@ -13,7 +13,6 @@ __pycache__/
 .venv/
 venv/
 
-# rsconnect deploy artifacts. The manifest is regenerated at deploy time; commit
-# it only if this app moves to git-backed deployment.
-manifest.json
+# rsconnect deploy artifacts. The extension's manifest.json is committed: the
+# Gallery builds the release bundle from it.
 rsconnect-python/

@@ -1,0 +1,9 @@
+{
+  "categories": [
+    {
+      "id": "gateway",
+      "title": "AI Gateway",
+      "description": "Dashboards for the usage data Posit Connect collects from the Posit AI Gateway."
+    }
+  ]
+}

@@ -23,9 +23,14 @@ from pricing import est_cost, est_cost_uncached
 
 # ---- what the loaded data covers ------------------------------------------------
 def data_window() -> tuple[date, date]:
-    """The first and last day with any record."""
+    """The first and last day with any record; today for both when there is none.
+
+    MIN and MAX over no rows are NULL, and the date picker cannot take that.
+    """
     first = usage.scalar("SELECT MIN(day) FROM gateway_events")
     last = usage.scalar("SELECT MAX(day) FROM gateway_events")
+    if pd.isna(first) or pd.isna(last):
+        return date.today(), date.today()
     return first.date(), last.date()
 
 

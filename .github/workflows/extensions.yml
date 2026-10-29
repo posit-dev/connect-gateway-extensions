@@ -1,0 +1,69 @@
+name: Extensions
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  extensions:
+    strategy:
+      fail-fast: false
+      matrix:
+        extension:
+          - gateway-usage-dashboard
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+
+      - uses: posit-dev/connect-gallery-action/build-extension@main
+        with:
+          extension-name: ${{ matrix.extension }}
+          extensions-dir: extensions
+          release: ${{ github.ref_name == 'main' }}
+
+  update-gallery:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    needs: [extensions]
+    if: always() && github.ref_name == 'main'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+
+      # main is protected, so the regenerated extensions.json goes to a branch
+      # and a pull request instead of a direct push.
+      - uses: posit-dev/connect-gallery-action@main
+        id: gallery
+        with:
+          extensions-dir: extensions
+          commit: "false"
+
+      - name: Open a pull request for extensions.json
+        if: steps.gallery.outputs.has-updates == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C update-extensions-json
+          git add extensions.json
+          git commit -m "chore: update extensions.json"
+          git push --force origin update-extensions-json
+          if gh pr view update-extensions-json --json state --jq .state | grep -qx OPEN; then
+            echo "A pull request for update-extensions-json is already open."
+          elif ! gh pr create --base main --head update-extensions-json \
+            --title "chore: update extensions.json" \
+            --body "Regenerated from the latest releases by the Extensions workflow."; then
+            echo "::warning::Could not open a pull request. Open one from update-extensions-json: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...update-extensions-json"
+          fi
