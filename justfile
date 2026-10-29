@@ -11,7 +11,7 @@ default:
     @just --list
 
 # Create .venv and install the app's requirements.
-setup: (_install "requirements.txt")
+setup: (_install "extensions/gateway-usage-dashboard/requirements.txt")
 
 # Create .venv with the app's requirements plus the development tools.
 setup-dev: (_install "dev-requirements.txt")
@@ -112,15 +112,11 @@ mock:
 
 # Deploy to a Connect server: `just deploy <url> <api-key>`, defaulting to the environment.
 deploy server=env_var_or_default("CONNECT_SERVER", "") key=env_var_or_default("CONNECT_API_KEY", ""):
-    @rsconnect deploy shiny . --server "{{server}}" --api-key "{{key}}" \
+    @rsconnect deploy shiny extensions/gateway-usage-dashboard --server "{{server}}" --api-key "{{key}}" \
         --title "Posit Team AI Usage Dashboard" --entrypoint app:app \
-        --exclude '.venv/*' --exclude 'demo/*' --exclude '__pycache__/*' \
-        --exclude 'rsconnect-python/*' --exclude 'justfile' \
-        --exclude 'dev-requirements.txt' --exclude 'pyrightconfig.json' \
-        --exclude 'pytest.ini' --exclude 'tests/*' \
-        --exclude '.gateway-cache/*'
+        --exclude '__pycache__/*' --exclude '.gateway-cache/*'
 
 # The one way the app starts. Do not add mode-specific settings here.
 _app server key:
     @CONNECT_SERVER="{{server}}" CONNECT_API_KEY="{{key}}" \
-        .venv/bin/shiny run app:app --port {{port}}
+        .venv/bin/shiny run app:app --app-dir extensions/gateway-usage-dashboard --port {{port}}

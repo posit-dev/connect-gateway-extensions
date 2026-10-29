@@ -33,6 +33,8 @@ import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+# The extension the Gallery ships: the app modules, and the directory `shiny run` starts in.
+APP = ROOT / "extensions" / "gateway-usage-dashboard"
 
 # The window every export-shaping test reads with: all of September 2026.
 WINDOW_FROM = "2026-09-01T00:00:00Z"
@@ -196,7 +198,7 @@ def _running_app(env: dict[str, str]) -> Iterator[str]:
     port = _free_port()
     server = subprocess.Popen(
         [sys.executable, "-m", "shiny", "run", "app:app", "--port", str(port)],
-        cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        cwd=APP, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
     assert server.stderr is not None
     url = f"http://127.0.0.1:{port}"

@@ -18,6 +18,25 @@ from scratch every 24 hours. A Parquet snapshot in `.gateway-cache/` lets a
 restarted process reuse its existing rows, although catching up still requires
 a full-window export from Connect.
 
+## Install from the Gallery
+
+On a Connect server with `[Gateway] Enabled = true`, the dashboard appears in
+the Gallery under "LLM Gateway Extensions". Only administrators see it. It
+needs Connect 2026.11.0 or later.
+
+Connect adds the feed by default. If your `[GalleryFeed]` settings replace the
+defaults, add it by hand:
+
+```toml
+[GalleryFeed "gateway"]
+Name = "LLM Gateway Extensions"
+URL = "https://raw.githubusercontent.com/posit-dev/connect-gateway-extensions/refs/heads/main/extensions.json"
+```
+
+The app lives in `extensions/gateway-usage-dashboard/`. Its `manifest.json`
+carries the Gallery metadata. A version bump there, merged to `main`, publishes
+a release.
+
 ## Configuration
 
 The app needs two environment variables:
@@ -74,20 +93,20 @@ one such model.
 
 ## Backfill a real Connect with demo usage
 
-`demo/backfill_agave.py` fills a real Connect's gateway usage log with synthetic
+`demo/backfill_connect.py` fills a real Connect's gateway usage log with synthetic
 usage for a demo server. It reads the server's users, content and prices through
 the API (`CONNECT_SERVER`, `CONNECT_API_KEY`), so every GUID in a row resolves
 when the dashboard calls Connect. It writes JSONL files in the layout Connect
 uses for its own usage log, under a node name of its own.
 
 ```bash
-python demo/backfill_agave.py --out /tmp/backfill
+python demo/backfill_connect.py --out /tmp/backfill --integration <integration-guid>
 tar -C /tmp/backfill -cf - . | kubectl -n <ns> exec -i <connect-pod> -c connect -- \
   tar -C /var/lib/rstudio-connect/gateway -xf -
 ```
 
 To remove the data, delete the `node=<node>` directories (the default node is
-`agave-site-connect-backfill`). The node name is the only mark of the rows.
+`connect-backfill`). The node name is the only mark of the rows.
 
 A running dashboard only merges recently ingested records, and the backfilled
 rows have older ingest times. It shows them after its next full reload (every 24
@@ -122,7 +141,7 @@ Importing `usage` does nothing; `app.py` runs the first `usage.load()`.
 
 ## Architecture
 
-`app:app` is the entrypoint. `app.py` is the shell and the wiring. It builds
+The paths below are in `extensions/gateway-usage-dashboard/`. `app:app` is the entrypoint. `app.py` is the shell and the wiring. It builds
 the page frame and the filter drawer, keeps the state that every page shares,
 and starts each page's server. The shared state is the loaded-data catalog, the
 filter dict `flt()`, the data refresh, bookmarks and URL query state, the
@@ -155,20 +174,14 @@ The helper modules hold no Shiny session state:
   components.
 - `theme.py` holds the chart styling, palette and stat tiles.
 
-## Deploy to Agave
+## Deploy by hand
 
-The app runs on Agave, https://connect.agave.pwb.posit.it. Sign in once with
-OAuth. rsconnect opens a browser and stores the token:
-
-```bash
-rsconnect login https://connect.agave.pwb.posit.it
-```
-
-Then redeploy new code to the same content item. To deploy to any other server
-with an API key, run `just deploy <connect-url> <api-key>`.
+Most servers should install the app from the Gallery (see above). To deploy a
+copy yourself, run `just deploy <connect-url> <api-key>`, or call rsconnect
+directly. Add `--app-id <content-guid>` to redeploy to an existing content item.
 
 ```bash
-rsconnect deploy shiny . --server https://connect.agave.pwb.posit.it \
-  --app-id a9aa52e2-3b47-4d39-ad15-e4dcbe509b72 --entrypoint app:app
+rsconnect deploy shiny extensions/gateway-usage-dashboard \
+  --server <connect-url> --api-key <api-key> --entrypoint app:app
 ```
 
