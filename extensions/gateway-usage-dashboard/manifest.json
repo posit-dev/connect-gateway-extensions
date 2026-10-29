@@ -3,7 +3,7 @@
     "name": "gateway-usage-dashboard",
     "title": "Posit AI Gateway Usage Dashboard",
     "description": "Explore how your organization uses the Posit AI Gateway: spend, tokens, adoption, conversations and per-user attribution across models and clients.",
-    "homepage": "https://github.com/posit-dev/ai-usage-dashboard/tree/main/extensions/gateway-usage-dashboard",
+    "homepage": "https://github.com/posit-dev/connect-gateway-extensions/tree/main/extensions/gateway-usage-dashboard",
     "category": "gateway",
     "tags": [
       "LLM Gateway"
