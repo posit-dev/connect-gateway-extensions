@@ -216,7 +216,6 @@ def test_higher_cost_custom_percentile():
 def test_sql_str_quotes_and_escapes():
     assert sql_str("plain") == "'plain'"
     assert sql_str("O'Brien") == "'O''Brien'"
-    assert sql_str(5) == "'5'"
     assert sql_str("'; DROP TABLE x; --") == "'''; DROP TABLE x; --'"
 
 

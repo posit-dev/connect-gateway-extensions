@@ -312,7 +312,7 @@ def _kind_source(kind: str) -> tuple[str, str]:
     return "gateway_events", KEY_COL[kind]
 
 
-def pred(kind: str, key: str | None) -> str:
+def pred(kind: str, key: str) -> str:
     """The rows of one principal, as a condition on plain gateway_events."""
     if kind == "group":
         return f"user_guid IN (SELECT user_guid FROM user_groups WHERE group_guid = {sql_str(key)})"
@@ -409,7 +409,7 @@ def session_owner(session_id: str) -> str | None:
         f"SELECT MAX(username) FROM gateway_events WHERE {pred('session', session_id)}")
 
 
-def owner_sessions(f: Filters, owner: str | None) -> pd.DataFrame:
+def owner_sessions(f: Filters, owner: str) -> pd.DataFrame:
     """session, id, first, last, requests, est_spend_usd: every session of one user."""
     return usage.q(f"""
         SELECT MAX(workbench_session_name) AS session, workbench_session_id AS id,
@@ -420,7 +420,7 @@ def owner_sessions(f: Filters, owner: str | None) -> pd.DataFrame:
         GROUP BY 2 ORDER BY est_spend_usd DESC""")
 
 
-def owner_projects(f: Filters, owner: str | None) -> pd.DataFrame:
+def owner_projects(f: Filters, owner: str) -> pd.DataFrame:
     """project, sessions, requests, est_spend_usd: a user's Workbench projects."""
     return usage.q(f"""
         SELECT COALESCE(workbench_project_name, '(no project)') AS project,

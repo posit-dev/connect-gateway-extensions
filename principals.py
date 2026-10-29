@@ -121,6 +121,13 @@ def relations(f: Filters, kind: str, key: str) -> list[dict]:
         ]
     if kind == "session":
         owner = queries.session_owner(key)
+        if owner is None:
+            nobody = "No user is recorded for this session, so there is nothing to compare it with."
+            return [
+                dict(title="All sessions", df=pd.DataFrame(), label="session", note="", empty=nobody),
+                dict(title="Workbench projects", df=pd.DataFrame(), label="project", note="",
+                     empty=nobody),
+            ]
         return [
             dict(title=f"All sessions by {owner}", df=queries.owner_sessions(f, owner),
                  label="session", note=""),

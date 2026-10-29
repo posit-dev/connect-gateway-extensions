@@ -10,7 +10,7 @@ from datetime import date
 TOKEN_COUNT = "(input_tokens + output_tokens)"
 
 
-def sql_str(x: object) -> str:
+def sql_str(x: str) -> str:
     return "'" + str(x).replace("'", "''") + "'"
 
 
