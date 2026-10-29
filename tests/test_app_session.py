@@ -12,10 +12,13 @@ import csv
 import io
 import json
 import re
+from dataclasses import replace
 from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 
+import queries
+from conftest import viewed
 from session import Reply, Session, browser_inputs, fetch_page, figure_traces, open_session, run
 
 # The outputs each page renders on first view. Attribution shows nothing until a
@@ -113,7 +116,6 @@ def test_the_records_grid_lists_every_row_newest_first(app_server):
 @pytest.mark.parametrize("narrow", [False, True], ids=["all", "two-groups"])
 def test_spend_and_tokens_agree_across_pages(app_server, loaded, f, narrow):
     """The same filter gives the same totals on the Overview, the top bar and every CSV."""
-    import filters
     import pricing
 
     groups = loaded.q("SELECT DISTINCT group_guid FROM user_groups ORDER BY 1").group_guid
@@ -129,10 +131,10 @@ def test_spend_and_tokens_agree_across_pages(app_server, loaded, f, narrow):
     got = visit(app_server, scenario)
     reply: Reply = got["reply"]
     assert reply.errors == {}
-    f["groups"] = groups
-    where = filters.where(f)
-    total = loaded.scalar(f"SELECT SUM({pricing.est_cost()}) FROM gateway_events WHERE {where}")
-    requests = loaded.scalar(f"SELECT COUNT(*) FROM gateway_events WHERE {where}")
+    where, params = viewed(replace(f, groups=tuple(groups)))
+    total = loaded.scalar(
+        f"SELECT SUM({pricing.est_cost()}) FROM gateway_events WHERE {where}", params)
+    requests = loaded.scalar(f"SELECT COUNT(*) FROM gateway_events WHERE {where}", params)
     assert total > 0
 
     # Overview tile and top bar show the same whole dollars.
@@ -147,7 +149,7 @@ def test_spend_and_tokens_agree_across_pages(app_server, loaded, f, narrow):
     assert len(records) == requests
     assert sum(float(r["est_cost_usd"] or 0) for r in records) == pytest.approx(total, abs=0.1)
     assert sum(int(r["tok_in"] or 0) for r in records) == loaded.scalar(
-        f"SELECT SUM(input_tokens) FROM gateway_events WHERE {where}")
+        f"SELECT SUM(input_tokens) FROM gateway_events WHERE {where}", params)
 
 
 def test_refresh_reloads_in_the_background_and_says_so(app_server):
@@ -188,19 +190,15 @@ def test_csv_downloads_are_registered_and_streamed(app_server):
 
 
 def test_unpriced_models_are_warned_about_in_the_top_bar(app_server, loaded, f):
-    import filters
-    import pricing
-
-    unpriced = loaded.q(f"""SELECT model, COUNT(*) requests FROM gateway_events
-        WHERE {filters.where(f)} AND model IS NOT NULL AND model <> ''
-        GROUP BY 1 HAVING SUM({pricing.est_cost()}) = 0 AND SUM(input_tokens + output_tokens) > 0""")
+    unpriced = queries.unpriced_models(f)
     assert len(unpriced) == 1, "the fake Connect should leave exactly one model unpriced"
     model, requests = unpriced.model[0], int(unpriced.requests[0])
 
     # A user who never called the unpriced model.
-    priced = loaded.q(f"""SELECT username FROM gateway_events WHERE {filters.where(f)}
+    where, params = viewed(f)
+    priced = loaded.q(f"""SELECT username FROM gateway_events WHERE {where}
         AND username IS NOT NULL GROUP BY 1
-        HAVING COUNT(*) FILTER (WHERE model = '{model}') = 0 ORDER BY 1 LIMIT 1""").username
+        HAVING COUNT(*) FILTER (WHERE model = '{model}') = 0 ORDER BY 1 LIMIT 1""", params).username
 
     async def scenario(session: Session, first: Reply, html: str):
         return first, await session.update(f_users=priced.tolist())

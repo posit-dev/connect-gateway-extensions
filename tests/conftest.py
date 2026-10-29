@@ -32,6 +32,8 @@ import duckdb
 import pandas as pd
 import pytest
 
+from filters import Filters, Params
+
 ROOT = Path(__file__).resolve().parents[1]
 # The extension the Gallery ships: the app modules, and the directory `shiny run` starts in.
 APP = ROOT / "extensions" / "gateway-usage-dashboard"
@@ -249,18 +251,22 @@ def loaded(fake_connect: str) -> ModuleType:
 
 
 @pytest.fixture
-def f(loaded) -> dict:
-    """The filter dict for the app's default window with nothing narrowed."""
+def f(loaded) -> Filters:
+    """The filters for the app's default window with nothing narrowed."""
     import app
 
     c = app.catalog()
     start, end = app.preset_range(app.DEFAULT_PRESET, c["start"], c["end"])
-    return {
-        "start": start, "end": end,
-        "all_users": c["users"], "all_contents": c["contents"], "groups": [],
-        "users": [], "contents": [], "sessions": [], "meta": [],
-        "mode": "dark",
-    }
+    return Filters(
+        start=start, end=end,
+        all_users=tuple(c["users"]), all_contents=tuple(c["contents"]),
+    )
+
+
+def viewed(f: Filters) -> tuple[str, dict]:
+    """A filter's predicate and the values bound into it, to use in a test's own SQL."""
+    p = Params()
+    return f.where(p), p.values
 
 
 @pytest.fixture(scope="session")

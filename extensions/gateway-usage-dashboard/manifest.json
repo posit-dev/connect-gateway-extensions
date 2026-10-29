@@ -74,6 +74,9 @@
     "principals.py": {
       "checksum": "687b471eefdb3d1ee3cfc0f321257c21"
     },
+    "queries.py": {
+      "checksum": "847ca9b1085e08fd65aea250b6401cd6"
+    },
     "theme.py": {
       "checksum": "da9d7a45976852550f6e46a8bafffc8e"
     },

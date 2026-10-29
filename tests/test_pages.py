@@ -8,6 +8,7 @@ same frames) contain.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import NoReturn
 
@@ -15,9 +16,11 @@ import pandas as pd
 import pytest
 from shiny import reactive, ui
 
-import filters
 import pricing
 import principals
+import queries
+from conftest import viewed
+from filters import Filters
 from pages import adoption, overview, raw_data
 from pages.context import PageContext
 
@@ -32,17 +35,15 @@ def make_ctx(f):
     """A PageContext over `f`. Exports land in the returned dicts."""
     import app
 
-    def make(sql_exports: dict | None = None):
+    def make(sql_exports: dict | None = None, narrowed: Filters | None = None):
         exports: dict = {}
         ctx = PageContext(
-            flt=lambda: f, where=filters.where, cat=app.catalog,
-            est_cost=pricing.est_cost,
+            flt=lambda: narrowed or f, cat=app.catalog,
             register_export=lambda name, fn, filename: exports.update({name: (fn, filename)}),
             register_sql_export=(
                 unused if sql_exports is None
                 else lambda name, fn, filename: sql_exports.update({name: (fn, filename)})
             ),
-            est_cost_uncached=pricing.est_cost_uncached,
             fitted_grid=app.fitted_grid,
         )
         return ctx, exports
@@ -51,20 +52,22 @@ def make_ctx(f):
 
 
 def test_peers_rank_and_flag_outliers(loaded, f):
-    w, cost = filters.where(f), pricing.est_cost()
-    users = principals.peers_df("user", w, cost)
+    where, params = viewed(f)
+    cost = pricing.est_cost()
+    users = principals.peers_df(f, "user")
     assert users.spend.tolist() == sorted(users.spend, reverse=True)
     assert users.spend.sum() == pytest.approx(loaded.scalar(
-        f"SELECT SUM({cost}) FROM gateway_events WHERE {w} AND username IS NOT NULL"))
+        f"SELECT SUM({cost}) FROM gateway_events WHERE {where} AND username IS NOT NULL",
+        params))
     assert users.label.is_unique
     # The fake Connect has a runaway content item: the top spender, and flagged.
-    content = principals.peers_df("content", w, cost)
+    content = principals.peers_df(f, "content")
     assert content.outlier.iloc[0]
     assert content.outlier.sum() < len(content) / 2
 
 
 def test_peer_table_lists_outliers_first_and_marks_the_pick(loaded, f):
-    peers = principals.peers_df("content", filters.where(f), pricing.est_cost())
+    peers = principals.peers_df(f, "content")
     top = peers.k.iloc[0]
     html = str(principals.peer_table(peers, "content", str(top), "", True))
     # One row per content item; the runaway one leads, picked and flagged.
@@ -106,14 +109,14 @@ def test_principals_panel_outputs():
 def test_principals_exports_use_raw_data_sql(loaded, f, make_ctx):
     sql_exports: dict = {}
     ctx, exports = make_ctx(sql_exports=sql_exports)
-    peers = principals.peers_df("user", filters.where(f), pricing.est_cost())
+    peers = principals.peers_df(f, "user")
     user = peers.k.iloc[0]
     inputs = SimpleNamespace(
         pf_kind=lambda: "user", pf_pick=lambda: user,
         pf_grain=lambda: "day", pf_sort=lambda: "", pf_row=lambda: "",
     )
-    records_sql = raw_data.server(inputs, ctx)
-    principals.server(inputs, ctx, records_sql)
+    raw_data.server(inputs, ctx)
+    principals.server(inputs, ctx)
     assert {name: filename for name, (_, filename) in exports.items()} == {
         "pf_rel_0": "pf_connections_1.csv", "pf_rel_1": "pf_connections_2.csv",
     }
@@ -122,8 +125,8 @@ def test_principals_exports_use_raw_data_sql(loaded, f, make_ctx):
     with reactive.isolate():
         # The uncapped export is the Raw Data builder over this principal's rows.
         sql = sql_exports["pf_records"][0]()
-        assert sql == records_sql(f"{filters.where(f)} AND {principals.pred('user', user)}")
-        records = loaded.q(sql)
+        assert sql == queries.principal_records_query(f, "user", user)
+        records = loaded.q(*sql)
         content = exports["pf_rel_0"][0]()
     assert len(records) == peers.requests.iloc[0]
     assert set(records.username) == {user}
@@ -131,9 +134,9 @@ def test_principals_exports_use_raw_data_sql(loaded, f, make_ctx):
     assert "content" in content.columns
 
 
-def run_export(make_ctx, page, name: str, **inputs):
+def run_export(make_ctx, page, name: str, narrowed: Filters | None = None, **inputs):
     """Start a page's server and call the export it registered."""
-    ctx, exports = make_ctx()
+    ctx, exports = make_ctx(narrowed=narrowed)
     page.server(SimpleNamespace(**{k: (lambda v=v: v) for k, v in inputs.items()}), ctx)
     with reactive.isolate():
         filename = exports[name][1]
@@ -149,7 +152,7 @@ def test_adoption_export_counts_active_users(loaded, f, make_ctx):
         "day", "daily_active_users", "weekly_active_users", "monthly_active_users"]
     df = df.rename(columns={"daily_active_users": "dau", "weekly_active_users": "wau",
                             "monthly_active_users": "mau"})
-    days = (f["end"] - f["start"]).days + 1
+    days = (f.end - f.start).days + 1
     assert len(df) == days
     assert df.day.astype(str).str[:10].tolist() == sorted(df.day.astype(str).str[:10])
     # A wider window can only hold more of the same people.
@@ -157,7 +160,7 @@ def test_adoption_export_counts_active_users(loaded, f, make_ctx):
 
     # On the last day, MAU is the distinct users of the 30 days ending then.
     last = df.iloc[-1]
-    day = f["end"]
+    day = f.end
     distinct = loaded.scalar(f"""SELECT COUNT(DISTINCT username) FROM gateway_events
         WHERE username IS NOT NULL AND ts >= TIMESTAMP '{day} 23:59:59.999' - INTERVAL 30 DAY
           AND ts <= TIMESTAMP '{day} 23:59:59.999'""")
@@ -168,11 +171,12 @@ def test_adoption_export_counts_active_users(loaded, f, make_ctx):
 
 
 def test_adoption_narrowed_to_one_user(loaded, f, make_ctx):
-    user = loaded.q(f"""SELECT username FROM gateway_events WHERE {filters.where(f)}
-                        AND username IS NOT NULL GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1""")
-    f["users"] = [user.username[0]]
+    where, params = viewed(f)
+    user = loaded.q(f"""SELECT username FROM gateway_events WHERE {where}
+                        AND username IS NOT NULL GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1""",
+                    params)
     df, _ = run_export(make_ctx, adoption, "adoption", adoption_kind="user",
-                       tool_grain="week")
+                       tool_grain="week", narrowed=replace(f, users=(user.username[0],)))
     assert df.monthly_active_users.max() == 1
     assert df.daily_active_users.max() == 1
 
@@ -185,7 +189,7 @@ def test_adoption_counts_content_items_when_toggled(loaded, f, make_ctx):
     assert df.columns.tolist() == [
         "day", "daily_active_content_items", "weekly_active_content_items",
         "monthly_active_content_items"]
-    day = f["end"]
+    day = f.end
     on_day = loaded.scalar(f"""SELECT COUNT(DISTINCT content_guid) FROM gateway_events
         WHERE content_guid IS NOT NULL AND CAST(ts AS DATE) = DATE '{day}'""")
     assert df.iloc[-1].daily_active_content_items == on_day
@@ -193,37 +197,35 @@ def test_adoption_counts_content_items_when_toggled(loaded, f, make_ctx):
 
 
 def test_raw_data_records_follow_the_filter(loaded, f, make_ctx):
-    def start():
+    def start(narrowed: Filters | None = None):
         # A new server each time: the page caches its WHERE for the filter it saw.
         sql_exports: dict = {}
-        ctx, _ = make_ctx(sql_exports=sql_exports)
-        return raw_data.server(SimpleNamespace(), ctx), sql_exports["records"]
+        ctx, _ = make_ctx(sql_exports=sql_exports, narrowed=narrowed)
+        raw_data.server(SimpleNamespace(), ctx)
+        return sql_exports["records"]
 
-    def export() -> pd.DataFrame:
-        _, (sql_fn, _) = start()
+    def export(narrowed: Filters | None = None) -> pd.DataFrame:
+        sql_fn, _ = start(narrowed)
         with reactive.isolate():
-            return loaded.q(sql_fn())
+            return loaded.q(*sql_fn())
 
-    records_sql, (_, filename) = start()
+    _, filename = start()
     assert filename == "gateway_records.csv"
     everything = export()
-    assert len(everything) == loaded.scalar(
-        f"SELECT COUNT(*) FROM gateway_events WHERE {filters.where(f)}")
+    assert len(everything) == queries.record_count(f)
     assert everything.ts.is_monotonic_decreasing
     assert {"origin", "tool", "username", "authenticated_username", "viewer_username",
             "content_owner_username", "via", "est_cost_usd", "request_metadata"} <= set(
         everything.columns)
     assert everything.est_cost_usd.sum() == pytest.approx(
-        loaded.scalar(f"SELECT SUM({pricing.est_cost()}) FROM gateway_events "
-                      f"WHERE {filters.where(f)}"), abs=0.1)  # each row is rounded to 4 places
+        queries.total_spend(f), abs=0.1)  # each row is rounded to 4 places
     assert everything.response_id.is_unique  # no row is repeated by the grid's joins
 
     group = loaded.q("SELECT group_guid FROM user_groups ORDER BY 1 LIMIT 1").group_guid[0]
-    members = set(loaded.q(f"""SELECT DISTINCT username FROM gateway_events WHERE user_guid IN
-        (SELECT user_guid FROM user_groups WHERE group_guid = '{group}')""").username)
-    f["groups"] = [group]
-    narrowed = export()
+    members = set(loaded.q("""SELECT DISTINCT username FROM gateway_events WHERE user_guid IN
+        (SELECT user_guid FROM user_groups WHERE group_guid = $g)""", {"g": group}).username)
+    narrowed = export(replace(f, groups=(group,)))
     assert set(narrowed.username) <= members
     assert 0 < len(narrowed) < len(everything)
-    # The builder principals reuse takes any predicate, and caps nothing itself.
-    assert "LIMIT" not in records_sql("TRUE")
+    # The export caps nothing itself.
+    assert "LIMIT" not in queries.records_query(f).sql

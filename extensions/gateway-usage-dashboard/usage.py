@@ -62,6 +62,8 @@ from typing import Any, Iterable
 import duckdb
 import pandas as pd
 
+from filters import Query
+
 EXPORT_PATH = "__api__/v1/system/gateway/usage/export"
 LOOKBACK_DAYS = 90
 
@@ -1109,13 +1111,14 @@ def _load(now: datetime | None = None) -> dict:
     return INFO
 
 
-def q(sql: str) -> pd.DataFrame:
+def q(sql: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
+    """Run a query and return its rows. `params` bind the `$name`s in the SQL."""
     with _lock:
-        return _con.sql(sql).df()
+        return _con.sql(sql, params=params).df()
 
 
-def scalar(sql: str) -> Any:
-    df = q(sql)
+def scalar(sql: str, params: dict[str, Any] | None = None) -> Any:
+    df = q(sql, params)
     return None if df.empty else df.iloc[0, 0]
 
 
@@ -1125,7 +1128,7 @@ def rows(df: pd.DataFrame) -> Iterable[Any]:
 
 
 
-def export_csv(sql: str) -> Path:
+def export_csv(query: Query) -> Path:
     """Write a query's full result to a temporary CSV and return its path.
 
     DuckDB writes the file itself, so a million-row export never has to sit in
@@ -1134,5 +1137,5 @@ def export_csv(sql: str) -> Path:
     fd, name = tempfile.mkstemp(suffix=".csv")
     os.close(fd)
     with _lock:
-        _con.execute(f"COPY ({sql}) TO '{name}' (FORMAT CSV, HEADER)")
+        _con.execute(f"COPY ({query.sql}) TO '{name}' (FORMAT CSV, HEADER)", query.params)
     return Path(name)

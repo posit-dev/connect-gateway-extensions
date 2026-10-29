@@ -5,9 +5,9 @@ import plotly.graph_objects as go
 from shiny import render, ui
 from shinywidgets import output_widget
 
+import queries
 import theme
-import usage
-from filters import NO_USER_AGENT, UNIDENTIFIED, dim_sql, sql_str
+from filters import NO_USER_AGENT, UNIDENTIFIED
 from pages.context import PageContext
 from theme import apply, card_num, card_usd, color, empty_fig, render_widget
 from ui_shell import help_icon, page_header
@@ -100,8 +100,7 @@ def panel():
 
 
 def server(input, ctx: PageContext):
-    flt, where = ctx.flt, ctx.where
-    est_cost, est_cost_uncached = ctx.est_cost, ctx.est_cost_uncached
+    flt = ctx.flt
 
     def group_by() -> str:
         by = input.group_by()
@@ -111,10 +110,6 @@ def server(input, ctx: PageContext):
         g = input.grain()
         return g if g in GRAINS else "day"
 
-    def group_sql(by: str) -> str:
-        """The SQL key of one group. With no grouping every row is in one."""
-        return "'Estimated spend'" if by == "none" else dim_sql(by)
-
     def group_color(by: str, key: str, mode: str) -> str:
         if by == "none":
             return theme.TOKENS[mode]["series"][0]
@@ -122,46 +117,10 @@ def server(input, ctx: PageContext):
             return theme.TOKENS[mode]["muted"]
         return color(COLOR_KIND[by], key, mode)
 
-    def bucket(f: dict, by: str, label: str) -> str:
-        """SQL for the group of a row: the six busiest by requests, the rest "Other".
-
-        A rate cannot be summed after the query, so the tail is folded in SQL.
-        """
-        if by == "none":
-            return sql_str(label)
-        k = dim_sql(by)
-        top = usage.q(f"""SELECT {k} AS k FROM gateway_events
-                          WHERE {where(f)} AND {k} IS NOT NULL AND {k} <> ''
-                          GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 6""").k.tolist()
-        keep = ",".join(sql_str(x) for x in top) or "''"
-        return f"CASE WHEN {k} IN ({keep}) THEN {k} ELSE 'Other' END"
-
-    def has_group(by: str) -> str:
-        """Leaves out the rows with no value for the group, as the spend charts do."""
-        k = dim_sql(by)
-        return "" if by == "none" else f"AND {k} IS NOT NULL AND {k} <> ''"
-
     @render.ui
     def kpis():
         f = flt()
-        # Each average divides the spend of that kind's own rows: all of the
-        # spend over two content items read as $3,769 per item when nearly all of
-        # it came from people outside content.
-        r = usage.q(f"""SELECT COALESCE(SUM({est_cost()}),0) est,
-                            COUNT(*) requests,
-                            COUNT(DISTINCT username) users,
-                            COUNT(DISTINCT content_guid) contents,
-                            COUNT(DISTINCT workbench_session_id) sessions,
-                            COALESCE(SUM({est_cost_uncached()} - {est_cost()}), 0) saved,
-                            100.0 * COUNT(*) FILTER (WHERE status_code >= 400)
-                                / NULLIF(COUNT(*), 0) AS err,
-                            COALESCE(SUM({est_cost()}) FILTER (
-                                WHERE username IS NOT NULL), 0) user_est,
-                            COALESCE(SUM({est_cost()}) FILTER (
-                                WHERE content_guid IS NOT NULL), 0) content_est,
-                            COALESCE(SUM({est_cost()}) FILTER (
-                                WHERE workbench_session_id IS NOT NULL), 0) session_est
-                     FROM gateway_events WHERE {where(f)}""").iloc[0]
+        r = queries.overview_totals(f)
         err = 0.0 if pd.isna(r.err) else float(r.err)
         users, contents, sessions = int(r.users), int(r.contents), int(r.sessions)
 
@@ -240,15 +199,10 @@ def server(input, ctx: PageContext):
     def spend_time():
         """Spend per day, week or month, stacked by the chosen group."""
         f, g, by = flt(), grain(), group_by()
-        k = group_sql(by)
-        df = usage.q(f"""SELECT date_trunc('{g}', day)::DATE AS b, {k} AS k,
-                                SUM({est_cost()}) v
-                         FROM gateway_events
-                         WHERE {where(f)} AND {k} IS NOT NULL AND {k} <> ''
-                         GROUP BY 1, 2 ORDER BY 1""")
+        df = queries.spend_by_period(f, g, by, "Estimated spend")
         if df.empty or not df.v.sum():
-            return empty_fig(f["mode"], "No estimated spend recorded in this view")
-        t = theme.TOKENS[f["mode"]]
+            return empty_fig(f.mode, "No estimated spend recorded in this view")
+        t = theme.TOKENS[f.mode]
         # The six biggest get a stack of their own; the tail is "Other".
         order = df.groupby("k").v.sum().sort_values(ascending=False).index.tolist()
         shown = order[:6]
@@ -261,13 +215,13 @@ def server(input, ctx: PageContext):
                 x=d.b,
                 y=d.v,
                 name=key,
-                marker={"color": group_color(by, key, f["mode"]) if key in shown
+                marker={"color": group_color(by, key, f.mode) if key in shown
                         else t["muted"]},
                 hovertemplate=f"<b>$%{{y:,.2f}}</b> {key}<extra></extra>",
             )
         fig.update_layout(barmode="stack", bargap=0.25)
         apply(
-            fig, f["mode"], height=300, time_axis=True, showlegend=by != "none",
+            fig, f.mode, height=300, time_axis=True, showlegend=by != "none",
             y_title=f"est. USD / {g}", hover=True,
         )
         return theme.usd_axis(fig, "y")
@@ -278,55 +232,44 @@ def server(input, ctx: PageContext):
         keys = df.groupby("k").v.size().sort_values(ascending=False).index
         for key in sorted(keys, key=lambda x: x == "Other"):
             d = df[df.k == key]
-            c = group_color(by, key, f["mode"])
+            c = group_color(by, key, f.mode)
             fig.add_scatter(
                 x=d.day, y=d.v, name=key, mode="lines+markers",
                 line={"width": 2.5, "color": c}, marker={"size": 5, "color": c},
                 hovertemplate=f"<b>{fmt}</b> {key}<extra></extra>",
             )
         fig.update_yaxes(**yaxis)
-        return apply(fig, f["mode"], height=300, time_axis=True, showlegend=by != "none",
+        return apply(fig, f.mode, height=300, time_axis=True, showlegend=by != "none",
                      y_title=y_title, hover=True)
 
     # ---- caching --------------------------------------------------------------
     @render_widget
     def cache_savings_time():
         f, g, by = flt(), grain(), group_by()
-        k = bucket(f, by, "Saved")
-        df = usage.q(f"""SELECT date_trunc('{g}', day)::DATE AS day, {k} AS k,
-                                SUM({est_cost_uncached()} - {est_cost()}) v
-                         FROM gateway_events
-                         WHERE {where(f)} {has_group(by)}
-                         GROUP BY 1, 2 ORDER BY 1""")
+        df = queries.cache_savings_by_period(f, g, by, "Saved")
         df["v"] = df.v.fillna(0).clip(lower=0)
         if df.empty or not df.v.sum():
-            return empty_fig(f["mode"], "No cache savings recorded in this view")
+            return empty_fig(f.mode, "No cache savings recorded in this view")
         fig = go.Figure()
         # largest saver first, so the stack and legend read in the same order
         for key in df.groupby("k").v.sum().sort_values(ascending=False).index:
             d = df[df.k == key]
             fig.add_bar(
                 x=d.day, y=d.v, name=key,
-                marker={"color": group_color(by, key, f["mode"])},
+                marker={"color": group_color(by, key, f.mode)},
                 hovertemplate=f"<b>$%{{y:,.2f}}</b> saved \u00b7 {key}<extra></extra>",
             )
         fig.update_layout(barmode="stack", bargap=0.25)
-        apply(fig, f["mode"], height=300, time_axis=True, showlegend=by != "none",
+        apply(fig, f.mode, height=300, time_axis=True, showlegend=by != "none",
               y_title=f"est. USD saved / {g}", hover=True)
         return theme.usd_axis(fig, "y")
 
     @render_widget
     def cache_rate_time():
         f, g, by = flt(), grain(), group_by()
-        k = bucket(f, by, "Cache read share")
-        # input_tokens already counts cache writes and reads (see usage._SHAPE).
-        df = usage.q(f"""SELECT date_trunc('{g}', day)::DATE AS day, {k} AS k,
-                                100.0 * SUM(COALESCE(cache_read_tokens, 0))
-                                    / NULLIF(SUM(COALESCE(input_tokens, 0)), 0) AS v
-                         FROM gateway_events WHERE {where(f)} {has_group(by)}
-                         GROUP BY 1, 2 ORDER BY 1""").dropna()
+        df = queries.cache_read_share_by_period(f, g, by, "Cache read share").dropna()
         if df.empty:
-            return empty_fig(f["mode"], "No input tokens recorded in this view")
+            return empty_fig(f.mode, "No input tokens recorded in this view")
         return group_lines(f, by, df, "%{y:.1f}%", "input read from cache",
                            {"range": [0, 100], "ticksuffix": "%"})
 
@@ -334,14 +277,8 @@ def server(input, ctx: PageContext):
     @render_widget
     def errors_time():
         f, g, by = flt(), grain(), group_by()
-        k = bucket(f, by, "Error rate")
-        df = usage.q(f"""SELECT date_trunc('{g}', day)::DATE AS day, {k} AS k,
-                                100.0 * COUNT(*) FILTER (WHERE status_code >= 400)
-                                    / COUNT(*) AS v
-                         FROM gateway_events
-                         WHERE {where(f)} AND status_code IS NOT NULL {has_group(by)}
-                         GROUP BY 1, 2 ORDER BY 1""")
+        df = queries.error_rate_by_period(f, g, by, "Error rate")
         if df.empty:
-            return empty_fig(f["mode"], "No requests in this view")
+            return empty_fig(f.mode, "No requests in this view")
         return group_lines(f, by, df, "%{y:.2f}%", "requests failed (status 400+)",
                            {"rangemode": "tozero", "ticksuffix": "%"})
