@@ -38,9 +38,21 @@ jobs:
     needs: [extensions]
     if: always() && github.ref_name == 'main'
     steps:
+      # main is protected, so the default GITHUB_TOKEN cannot push the
+      # regenerated extensions.json. The GitHub App is allowed to bypass the
+      # pull request requirement.
+      - name: Generate token for GitHub App
+        id: generate-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.GATEWAY_EXTENSIONS_APP_ID }}
+          private-key: ${{ secrets.GATEWAY_EXTENSIONS_APP_PEM }}
+          permission-contents: write
+
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.ref_name }}
+          token: ${{ steps.generate-token.outputs.token }}
 
       - uses: posit-dev/connect-gallery-action@main
         with:

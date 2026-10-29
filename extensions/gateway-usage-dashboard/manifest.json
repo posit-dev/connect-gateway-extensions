@@ -28,7 +28,7 @@
   },
   "environment": {
     "python": {
-      "requires": "~=3.13.0"
+      "requires": ">=3.10"
     }
   },
   "files": {
