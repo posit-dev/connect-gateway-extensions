@@ -2,14 +2,16 @@
   "categories": [
     {
       "id": "gateway",
-      "title": "LLM Gateway",
+      "title": "AI Gateway",
       "description": "Dashboards for the usage data Posit Connect collects from the Posit AI Gateway."
     }
   ],
   "tags": [
-    "LLM Gateway"
+    "AI Gateway"
   ],
-  "requiredFeatures": [],
+  "requiredFeatures": [
+    "OAuth Integrations"
+  ],
   "extensions": [
     {
       "name": "gateway-usage-dashboard",
@@ -17,10 +19,13 @@
       "description": "Explore how your organization uses the Posit AI Gateway: spend, tokens, adoption, conversations and per-user attribution across models and clients.",
       "homepage": "https://github.com/posit-dev/connect-gateway-extensions/tree/main/extensions/gateway-usage-dashboard",
       "latestVersion": {
-        "version": "0.1.0",
-        "released": "2026-10-29T20:21:38Z",
-        "url": "https://github.com/posit-dev/connect-gateway-extensions/releases/download/gateway-usage-dashboard%40v0.1.0/gateway-usage-dashboard.tar.gz",
+        "version": "0.1.2",
+        "released": "2026-10-29T21:20:32Z",
+        "url": "https://github.com/posit-dev/connect-gateway-extensions/releases/download/gateway-usage-dashboard%40v0.1.2/gateway-usage-dashboard.tar.gz",
         "minimumConnectVersion": "2026.11.0",
+        "requiredFeatures": [
+          "OAuth Integrations"
+        ],
         "requiredEnvironment": {
           "python": {
             "requires": ">=3.10"
@@ -29,10 +34,41 @@
       },
       "versions": [
         {
+          "version": "0.1.2",
+          "released": "2026-10-29T21:20:32Z",
+          "url": "https://github.com/posit-dev/connect-gateway-extensions/releases/download/gateway-usage-dashboard%40v0.1.2/gateway-usage-dashboard.tar.gz",
+          "minimumConnectVersion": "2026.11.0",
+          "requiredFeatures": [
+            "OAuth Integrations"
+          ],
+          "requiredEnvironment": {
+            "python": {
+              "requires": ">=3.10"
+            }
+          }
+        },
+        {
+          "version": "0.1.1",
+          "released": "2026-10-29T20:49:00Z",
+          "url": "https://github.com/posit-dev/connect-gateway-extensions/releases/download/gateway-usage-dashboard%40v0.1.1/gateway-usage-dashboard.tar.gz",
+          "minimumConnectVersion": "2026.11.0",
+          "requiredFeatures": [
+            "OAuth Integrations"
+          ],
+          "requiredEnvironment": {
+            "python": {
+              "requires": ">=3.10"
+            }
+          }
+        },
+        {
           "version": "0.1.0",
           "released": "2026-10-29T20:21:38Z",
           "url": "https://github.com/posit-dev/connect-gateway-extensions/releases/download/gateway-usage-dashboard%40v0.1.0/gateway-usage-dashboard.tar.gz",
           "minimumConnectVersion": "2026.11.0",
+          "requiredFeatures": [
+            "OAuth Integrations"
+          ],
           "requiredEnvironment": {
             "python": {
               "requires": ">=3.10"
@@ -41,7 +77,7 @@
         }
       ],
       "tags": [
-        "LLM Gateway"
+        "AI Gateway"
       ],
       "category": "gateway",
       "adminOnly": true
