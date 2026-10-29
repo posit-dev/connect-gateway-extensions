@@ -27,6 +27,7 @@ import pandas as pd
 from shiny import App, reactive, render, ui
 from starlette.requests import Request
 
+import access
 import principals
 import queries
 import usage
@@ -178,6 +179,9 @@ def with_clear(name: str, control: ui.Tag) -> ui.Tag:
 
 
 def app_ui(request: Request | None):
+    reason = access.denial(request.headers) if request else None
+    if reason:
+        return ui.page_fluid(ui.h4("Access denied"), ui.p(reason))
     return _shell(
         overview.panel(),
         principals.panel(),
@@ -344,6 +348,9 @@ def app_ui(request: Request | None):
 
 
 def server(input, output, session):
+    if access.denial(session.http_conn.headers):
+        return
+
     # Integrate bookmarking callbacks
     @session.bookmark.on_bookmarked
     async def _(url: str):
