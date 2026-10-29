@@ -368,6 +368,8 @@ def build_parquet() -> bytes:
     from where Connect files a record: its ingest day and its node.
     """
     df = make_rows()
+    if df.columns.empty:  # FAKE_ROWS=0: DuckDB needs one column to read from
+        df = pd.DataFrame({"start_time": pd.Series([], dtype="datetime64[ns, UTC]")})
     derived = {
         "date": "strftime(ingest_time AT TIME ZONE 'UTC', '%Y-%m-%d')",
         "node": "node_name",
