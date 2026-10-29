@@ -22,8 +22,9 @@ import usage
 SESSION_TOKEN_HEADER = "posit-connect-user-session-token"
 
 NEEDS_INTEGRATION = (
-    "This dashboard needs a Connect API integration to check who is viewing it. "
-    "An administrator can add one on the Integration Settings page for this app."
+    "This dashboard needs a Connect API integration (Max Role: Admin) to check who "
+    "is viewing it. Ask an administrator to add one in System \u2192 Integrations, "
+    "then add it to this content's Runtime settings."
 )
 NOT_ADMIN = "Only Connect administrators can view this dashboard."
 
