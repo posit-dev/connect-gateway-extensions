@@ -10,5 +10,41 @@
     "LLM Gateway"
   ],
   "requiredFeatures": [],
-  "extensions": []
+  "extensions": [
+    {
+      "name": "gateway-usage-dashboard",
+      "title": "Posit AI Gateway Usage Dashboard",
+      "description": "Explore how your organization uses the Posit AI Gateway: spend, tokens, adoption, conversations and per-user attribution across models and clients.",
+      "homepage": "https://github.com/posit-dev/connect-gateway-extensions/tree/main/extensions/gateway-usage-dashboard",
+      "latestVersion": {
+        "version": "0.1.0",
+        "released": "2026-10-29T20:21:38Z",
+        "url": "https://github.com/posit-dev/connect-gateway-extensions/releases/download/gateway-usage-dashboard%40v0.1.0/gateway-usage-dashboard.tar.gz",
+        "minimumConnectVersion": "2026.11.0",
+        "requiredEnvironment": {
+          "python": {
+            "requires": ">=3.10"
+          }
+        }
+      },
+      "versions": [
+        {
+          "version": "0.1.0",
+          "released": "2026-10-29T20:21:38Z",
+          "url": "https://github.com/posit-dev/connect-gateway-extensions/releases/download/gateway-usage-dashboard%40v0.1.0/gateway-usage-dashboard.tar.gz",
+          "minimumConnectVersion": "2026.11.0",
+          "requiredEnvironment": {
+            "python": {
+              "requires": ">=3.10"
+            }
+          }
+        }
+      ],
+      "tags": [
+        "LLM Gateway"
+      ],
+      "category": "gateway",
+      "adminOnly": true
+    }
+  ]
 }
