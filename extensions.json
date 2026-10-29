@@ -1,0 +1,14 @@
+{
+  "categories": [
+    {
+      "id": "gateway",
+      "title": "LLM Gateway",
+      "description": "Dashboards for the usage data Posit Connect collects from the Posit AI Gateway."
+    }
+  ],
+  "tags": [
+    "LLM Gateway"
+  ],
+  "requiredFeatures": [],
+  "extensions": []
+}
