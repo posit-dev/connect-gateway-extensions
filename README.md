@@ -1,4 +1,4 @@
-# Connect AI Gateway usage dashboard
+# Posit AI Gateway usage dashboard
 
 A Shiny for Python dashboard that reports LLM usage from the Posit Connect AI
 Gateway. It shows requests, tokens, and estimated spend, and it groups them by
@@ -21,7 +21,7 @@ a full-window export from Connect.
 ## Install from the Gallery
 
 On a Connect server with `[Gateway] Enabled = true`, the dashboard appears in
-the Gallery under "LLM Gateway Extensions". Only administrators see it. It
+the Gallery under "AI Gateway Extensions". Only administrators see it. It
 needs Connect 2026.11.0 or later.
 
 Connect adds the feed by default. If your `[GalleryFeed]` settings replace the
@@ -29,7 +29,7 @@ defaults, add it by hand:
 
 ```toml
 [GalleryFeed "gateway"]
-Name = "LLM Gateway Extensions"
+Name = "AI Gateway Extensions"
 URL = "https://raw.githubusercontent.com/posit-dev/connect-gateway-extensions/refs/heads/main/extensions.json"
 ```
 

@@ -6,11 +6,14 @@
     "homepage": "https://github.com/posit-dev/connect-gateway-extensions/tree/main/extensions/gateway-usage-dashboard",
     "category": "gateway",
     "tags": [
-      "LLM Gateway"
+      "AI Gateway"
     ],
     "minimumConnectVersion": "2026.11.0",
+    "requiredFeatures": [
+      "OAuth Integrations"
+    ],
     "adminOnly": true,
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "version": 1,
   "locale": "en_US.UTF-8",
