@@ -45,7 +45,7 @@ jobs:
         id: generate-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.GATEWAY_EXTENSIONS_APP_ID }}
+          client-id: ${{ vars.GATEWAY_EXTENSIONS_APP_CLIENT_ID }}
           private-key: ${{ secrets.GATEWAY_EXTENSIONS_APP_PEM }}
           permission-contents: write
 
