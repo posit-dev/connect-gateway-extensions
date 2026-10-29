@@ -1,5 +1,6 @@
 """Pure helpers: no Connect, no DuckDB session, no Shiny."""
 
+from dataclasses import replace
 from datetime import date
 
 import duckdb
@@ -8,9 +9,10 @@ import pytest
 
 import conversations
 import principals
+import queries
 import theme
 import usage
-from filters import where
+from filters import Filters, sql_str
 
 
 # ---- usage._catalog_prices ---------------------------------------------------
@@ -211,16 +213,16 @@ def test_higher_cost_custom_percentile():
 
 
 # ---- principals quoting --------------------------------------------------------
-def test_sq_quotes_and_escapes():
-    assert principals.sq("plain") == "'plain'"
-    assert principals.sq("O'Brien") == "'O''Brien'"
-    assert principals.sq(5) == "'5'"
-    assert principals.sq("'; DROP TABLE x; --") == "'''; DROP TABLE x; --'"
+def test_sql_str_quotes_and_escapes():
+    assert sql_str("plain") == "'plain'"
+    assert sql_str("O'Brien") == "'O''Brien'"
+    assert sql_str(5) == "'5'"
+    assert sql_str("'; DROP TABLE x; --") == "'''; DROP TABLE x; --'"
 
 
 @pytest.mark.parametrize("kind", ["user", "group", "content"])
 def test_pred_is_evaluable_sql_that_cannot_be_escaped(kind):
-    if kind not in principals.KEY_COL and kind != "group":
+    if kind not in queries.KEY_COL and kind != "group":
         pytest.skip("kind not a principal kind here")
     hostile = "x' OR '1'='1"
     con = duckdb.connect()
@@ -229,7 +231,7 @@ def test_pred_is_evaluable_sql_that_cannot_be_escaped(kind):
     con.execute("INSERT INTO gateway_events VALUES ('u1','u1','c1'), ('u2','u2','c2')")
     con.execute("INSERT INTO user_groups VALUES ('u1', 'g1')")
     count = lambda key: con.execute(  # noqa: E731
-        f"SELECT count(*) FROM gateway_events WHERE {principals.pred(kind, key)}").fetchall()[0][0]
+        f"SELECT count(*) FROM gateway_events WHERE {queries.pred(kind, key)}").fetchall()[0][0]
     assert count(hostile) == 0
     expected = {"group": ("g1", 1)}.get(kind)
     if expected:
@@ -328,12 +330,8 @@ def test_outliers_need_enough_priced_peers():
 
 # ---- filters.where: date edges ----------------------------------------------------
 @pytest.fixture
-def f() -> dict:
-    return {
-        "start": date(2026, 9, 1), "end": date(2026, 9, 30),
-        "users": [], "all_users": [], "contents": [], "all_contents": [],
-        "sessions": [], "groups": [], "meta": [],
-    }
+def f() -> Filters:
+    return Filters(start=date(2026, 9, 1), end=date(2026, 9, 30))
 
 
 def _matching(predicate: str, stamps: list[str]) -> list[str]:
@@ -349,14 +347,14 @@ def _matching(predicate: str, stamps: list[str]) -> list[str]:
 def test_where_includes_both_edge_days_entirely(f):
     stamps = ["2026-08-31 23:59:59.999", "2026-09-01 00:00:00", "2026-09-15 12:00:00",
               "2026-09-30 23:59:59.999", "2026-10-01 00:00:00"]
-    got = _matching(where(f), stamps)
+    got = _matching(f.where(), stamps)
     assert len(got) == 3
     assert got[0].startswith("2026-09-01 00:00:00")
     assert got[-1].startswith("2026-09-30 23:59:59")
 
 
 def test_where_single_day_window(f):
-    f["start"] = f["end"] = date(2026, 9, 5)
+    f = replace(f, start=date(2026, 9, 5), end=date(2026, 9, 5))
     stamps = ["2026-09-04 23:59:59", "2026-09-05 00:00:00", "2026-09-05 23:59:59.5",
               "2026-09-06 00:00:00"]
-    assert len(_matching(where(f), stamps)) == 2
+    assert len(_matching(f.where(), stamps)) == 2

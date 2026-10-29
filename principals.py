@@ -27,39 +27,18 @@ from shiny import reactive, render, req, ui
 from shinywidgets import output_widget
 
 import conversations as conv_tools
+import queries
 import theme
 import usage
 from conversations import HIGH_PCT, MIN_BASELINE, higher_cost
-from filters import TOKEN_COUNT, dim_sql
+from filters import Filters
 from pages.context import PageContext
 from theme import apply, empty_fig, fmt_usd, render_widget
 from ui_shell import empty_note, export_button, help_icon, page_header, table_header
 
 KINDS = {"user": "User", "content": "Content", "session": "Session", "group": "Group"}
 NOUN = {"user": "user", "content": "content item", "session": "session", "group": "group"}
-# The column that identifies a principal of each kind, on gateway_events. A group
-# is not a column: it is reached through user_groups (see kind_source).
-KEY_COL = {"user": "username", "content": "content_guid", "session": "workbench_session_id"}
 DASH, UP, DOWN = "\u2014", "\u25b2", "\u25bc"
-
-
-def sq(x) -> str:
-    """A SQL string literal."""
-    return "'" + str(x).replace("'", "''") + "'"
-
-
-def kind_source(kind: str) -> tuple[str, str]:
-    """(FROM clause, key expression) giving one group of rows per principal."""
-    if kind == "group":
-        return "gateway_events JOIN user_groups USING (user_guid)", "group_guid"
-    return "gateway_events", KEY_COL[kind]
-
-
-def pred(kind: str, key: str) -> str:
-    """The rows of one principal, as a condition on plain gateway_events."""
-    if kind == "group":
-        return f"user_guid IN (SELECT user_guid FROM user_groups WHERE group_guid = {sq(key)})"
-    return f"{KEY_COL[kind]} = {sq(key)}"
 
 
 def short(s, n: int = 8) -> str:
@@ -73,25 +52,10 @@ OUTLIER_PCT = 95
 OUTLIER_MIN_N = 8
 
 
-def peers_df(kind: str, w: str, cost: str) -> pd.DataFrame:
+def peers_df(f: Filters, kind: str) -> pd.DataFrame:
     """Every principal of a kind in view, ranked by spend, with the model each
     spent most on and whether it is an outlier."""
-    src, key = kind_source(kind)
-    has_key = f"{key} IS NOT NULL AND CAST({key} AS VARCHAR) <> ''"
-    extra = ", MAX(group_name) AS gname" if kind == "group" else ""
-    df = usage.q(f"""
-        SELECT {key} AS k, COALESCE(SUM({cost}), 0) AS spend, COUNT(*) AS requests,
-               COALESCE(SUM({TOKEN_COUNT}), 0) AS tokens,
-               MAX(username) AS owner, MAX(workbench_session_name) AS sname{extra}
-        FROM {src}
-        WHERE {w} AND {has_key}
-        GROUP BY 1""")
-    models = usage.q(f"""
-        SELECT k, arg_max(model, v) AS top_model
-        FROM (SELECT {key} AS k, model, COALESCE(SUM({cost}), 0) AS v
-              FROM {src} WHERE {w} AND {has_key} GROUP BY 1, 2)
-        GROUP BY k""")
-    df = df.merge(models, on="k", how="left")
+    df = queries.peer_spend(f, kind).merge(queries.peer_top_model(f, kind), on="k", how="left")
     df = df.sort_values("spend", ascending=False, ignore_index=True)
     df["label"] = [peer_label(kind, r) for r in df.itertuples()]
     # Two sessions can share a name, and a chart draws two bars with one label
@@ -126,29 +90,12 @@ def peer_label(kind: str, r) -> str:
     return str(r.gname)
 
 
-def daily(w: str, p: str, cost: str, grain: str = "day") -> pd.DataFrame:
-    """This principal's spend per day, week or month."""
-    return usage.q(f"""SELECT date_trunc('{grain}', day)::DATE AS day, SUM({cost}) v
-                       FROM gateway_events WHERE {w} AND {p} GROUP BY 1 ORDER BY 1""")
-
-
-def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
+def relations(f: Filters, kind: str, key: str) -> list[dict]:
     """Two tables of what this principal connects to. Each: title, note, df, label."""
-    p = pred(kind, key)
     if kind == "user":
-        content = usage.q(f"""
-            SELECT content_guid, string_agg(DISTINCT user_kind, ', ' ORDER BY user_kind) AS via,
-                   COUNT(*) requests, SUM({cost}) est_spend_usd
-            FROM gateway_events WHERE {w} AND {p} AND content_guid IS NOT NULL
-            GROUP BY 1 ORDER BY est_spend_usd DESC""")
+        content = queries.user_content(f, key)
         content.insert(0, "content", [usage.content_name(g) or short(g) for g in content.content_guid])
-        sessions = usage.q(f"""
-            SELECT MAX(workbench_session_name) AS session, workbench_session_id AS id,
-                   MAX(workbench_project_name) AS project,
-                   strftime(MIN(ts), '%Y-%m-%d') AS first, strftime(MAX(ts), '%Y-%m-%d') AS last,
-                   COUNT(*) requests, SUM({cost}) est_spend_usd
-            FROM gateway_events WHERE {w} AND {p} AND workbench_session_id IS NOT NULL
-            GROUP BY 2 ORDER BY est_spend_usd DESC""")
+        sessions = queries.user_sessions(f, key)
         return [
             dict(title="Content", df=content, label="content",
                  note="How they reached it: as a viewer, as the owner of content running "
@@ -161,16 +108,9 @@ def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
                        "header (workbench-session-id)."),
         ]
     if kind == "content":
-        users = usage.q(f"""
-            SELECT username AS user, string_agg(DISTINCT user_kind, ', ' ORDER BY user_kind) AS via,
-                   COUNT(*) requests, SUM({cost}) est_spend_usd
-            FROM gateway_events WHERE {w} AND {p} GROUP BY 1 ORDER BY est_spend_usd DESC""")
+        users = queries.content_users(f, key)
         top = users.est_spend_usd.iloc[0] / users.est_spend_usd.sum() if users.est_spend_usd.sum() else 0
-        groups = usage.q(f"""
-            SELECT group_name AS "group", COUNT(DISTINCT user_guid) users,
-                   COUNT(*) requests, SUM({cost}) est_spend_usd
-            FROM gateway_events JOIN user_groups USING (user_guid)
-            WHERE {w} AND {p} GROUP BY 1 ORDER BY est_spend_usd DESC""")
+        groups = queries.content_groups(f, key)
         return [
             dict(title="Who drives it", df=users, label="user",
                  note=f"The top user accounts for {top:.0%} of its spend." if len(users) else "",
@@ -180,40 +120,16 @@ def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
                  empty="None of the charged users is in a Connect group."),
         ]
     if kind == "session":
-        owner = usage.scalar(f"SELECT MAX(username) FROM gateway_events WHERE {p}")
-        mine = f"username = {sq(owner)}"
-        others = usage.q(f"""
-            SELECT MAX(workbench_session_name) AS session, workbench_session_id AS id,
-                   strftime(MIN(ts), '%Y-%m-%d') AS first, strftime(MAX(ts), '%Y-%m-%d') AS last,
-                   COUNT(*) requests, SUM({cost}) est_spend_usd
-            FROM gateway_events WHERE {w} AND {mine} AND workbench_session_id IS NOT NULL
-            GROUP BY 2 ORDER BY est_spend_usd DESC""")
-        projects = usage.q(f"""
-            SELECT COALESCE(workbench_project_name, '(no project)') AS project,
-                   COUNT(DISTINCT workbench_session_id) sessions,
-                   COUNT(*) requests, SUM({cost}) est_spend_usd
-            FROM gateway_events WHERE {w} AND {mine} AND source = 'workbench'
-            GROUP BY 1 ORDER BY est_spend_usd DESC""")
+        owner = queries.session_owner(key)
         return [
-            dict(title=f"All sessions by {owner}", df=others, label="session",
-                 note=""),
-            dict(title=f"{owner}'s Workbench projects", df=projects, label="project", note="",
+            dict(title=f"All sessions by {owner}", df=queries.owner_sessions(f, owner),
+                 label="session", note=""),
+            dict(title=f"{owner}'s Workbench projects", df=queries.owner_projects(f, owner),
+                 label="project", note="",
                  empty="No Workbench project named in this view."),
         ]
-    members = usage.q(f"""
-        SELECT a.username AS user, o.other_groups, a.requests, a.est_spend_usd
-        FROM (SELECT user_guid, MAX(username) username, COUNT(*) requests,
-                     SUM({cost}) est_spend_usd
-              FROM gateway_events WHERE {w} AND {p} GROUP BY 1) a
-        LEFT JOIN (SELECT user_guid, string_agg(group_name, ', ' ORDER BY group_name) other_groups
-                   FROM user_groups WHERE group_guid <> {sq(key)} GROUP BY 1) o
-        USING (user_guid) ORDER BY a.est_spend_usd DESC""")
-    overlap = usage.q(f"""
-        SELECT group_name AS "group", COUNT(DISTINCT user_guid) shared_members,
-               COUNT(*) requests, SUM({cost}) est_spend_usd
-        FROM gateway_events JOIN user_groups USING (user_guid)
-        WHERE {w} AND {p} AND group_guid <> {sq(key)}
-        GROUP BY 1 ORDER BY est_spend_usd DESC""")
+    members = queries.group_members(f, key)
+    overlap = queries.group_overlap(f, key)
     total = members.est_spend_usd.sum()
     shared = members[members.other_groups.notna()].est_spend_usd.sum()
     return [
@@ -226,35 +142,8 @@ def relations(kind: str, key: str, w: str, cost: str) -> list[dict]:
     ]
 
 
-def conversations(w: str, p: str, cost: str) -> pd.DataFrame:
-    df = usage.q(f"""
-        WITH ev AS (
-            SELECT *, {cost} AS cost,
-                   LAG(input_tokens) OVER (PARTITION BY conversation_id
-                                           ORDER BY ts, response_id) AS prev_input,
-                   MAX(cache_read_tokens) OVER (PARTITION BY conversation_id) AS cache_used
-            FROM gateway_events
-            WHERE {w} AND {p} AND conversation_id IS NOT NULL)
-        SELECT conversation_id AS conversation, MIN(ts) AS started,
-               date_diff('second', MIN(ts), MAX(ts)) / 60.0 AS minutes,
-               COUNT(*) AS turns, SUM(cost) AS est,
-               MAX(input_tokens) AS peak_context,
-               SUM(cache_read_tokens + cache_creation_tokens) > 0 AS uses_cache,
-               -- A cache miss: a request that read back under half of what the
-               -- one before it sent, in a conversation that uses the cache at
-               -- all. The tokens are what had to be read again. Below 1024
-               -- tokens nothing is cached, so a short prompt is no miss.
-               SUM(CASE WHEN prev_input >= 1024 AND cache_used > 0
-                             AND cache_read_tokens < 0.5 * prev_input
-                        THEN prev_input - cache_read_tokens ELSE 0 END) AS miss_tokens,
-               SUM(CASE WHEN status_code <> 200 THEN 1 ELSE 0 END) AS errors,
-               SUM(CASE WHEN finish_reason = 'tool_use' THEN 1 ELSE 0 END) AS tool_calls,
-               mode(model) AS model,
-               arg_max(model, cost) FILTER (WHERE model <> '') AS main_model,
-               arg_max(tool, cost) FILTER (WHERE tool IS NOT NULL) AS main_tool,
-               MAX(username) AS who, MAX(content_guid) AS content
-        FROM ev
-        GROUP BY 1 ORDER BY est DESC""")
+def conversations(f: Filters, kind: str, key: str) -> pd.DataFrame:
+    df = queries.principal_conversations(f, kind, key)
     # Judged against this principal's own conversations, so every figure below
     # is relative to the principal itself, not to the whole server.
     df[["high", "line"]] = higher_cost(df.est)
@@ -263,14 +152,14 @@ def conversations(w: str, p: str, cost: str) -> pd.DataFrame:
 
 # ---- figures ------------------------------------------------------------------------
 def fig_trend(me, f, grain: str = "day") -> go.Figure:
-    mode = f["mode"]
+    mode = f.mode
     if me.empty:
         return empty_fig(mode, "No estimated spend in this view")
     t = theme.TOKENS[mode]
     me = me.set_index(pd.to_datetime(me.day)).v
     if grain == "day":
         # Quiet days are zero-height bars, not gaps.
-        days = pd.date_range(pd.Timestamp(f["start"]), pd.Timestamp(f["end"]), freq="D")
+        days = pd.date_range(pd.Timestamp(f.start), pd.Timestamp(f.end), freq="D")
         me = me.reindex(days, fill_value=0)
     days = me.index
     fig = go.Figure()
@@ -281,16 +170,12 @@ def fig_trend(me, f, grain: str = "day") -> go.Figure:
     return apply(fig, mode, height=300, time_axis=True, showlegend=False, hover=True)
 
 
-def fig_split(w, p, cost, mode, col: str, kind: str, top: int = 8) -> go.Figure:
-    """Where this principal's estimated spend went, split by one column.
+def fig_split(df: pd.DataFrame, mode: str, kind: str, top: int = 8) -> go.Figure:
+    """Where this principal's estimated spend went; `df` holds k and v, biggest first.
 
     Bars, not a donut: with several models the slices were too thin to read or
     tell apart, and a bar carries its name and figure on the axis.
     """
-    k = dim_sql(col)
-    df = usage.q(f"""SELECT {k} AS k, SUM({cost}) v, COUNT(*) n FROM gateway_events
-                     WHERE {w} AND {p} AND {k} IS NOT NULL AND {k} <> ''
-                     GROUP BY 1 ORDER BY v DESC""")
     df = df[df.v > 0]
     if df.empty:
         return empty_fig(mode, "No estimated spend in this view")
@@ -474,14 +359,14 @@ def panel():
 
 
 # ---- server ------------------------------------------------------------------------
-def server(input, ctx: PageContext, records_sql):
-    """Wire the tab. `records_sql` is the Raw Data page's SQL builder."""
-    flt, where, est_cost = ctx.flt, ctx.where, ctx.est_cost
+def server(input, ctx: PageContext):
+    """Wire the tab."""
+    flt = ctx.flt
     register_export, register_sql_export = ctx.register_export, ctx.register_sql_export
 
     @reactive.calc
     def peers() -> pd.DataFrame:
-        return peers_df(input.pf_kind(), where(flt()), est_cost())
+        return peers_df(flt(), input.pf_kind())
 
     @reactive.effect
     def _choices():
@@ -531,9 +416,8 @@ def server(input, ctx: PageContext, records_sql):
     def ent() -> SimpleNamespace:
         kind, key, df = input.pf_kind(), input.pf_pick(), peers()
         req(key and key in set(df.k))
-        f = flt()
         return SimpleNamespace(
-            kind=kind, key=key, f=f, w=where(f), p=pred(kind, key), cost=est_cost(),
+            kind=kind, key=key, f=flt(),
             label=df.label[df.k == key].iloc[0], noun=NOUN[kind],
         )
 
@@ -551,28 +435,32 @@ def server(input, ctx: PageContext, records_sql):
     @render_widget
     def pf_trend():
         e = ent()
-        return fig_trend(daily(e.w, e.p, e.cost, input.pf_grain() or "day"), e.f,
-                         input.pf_grain() or "day")
+        grain = input.pf_grain() or "day"
+        return fig_trend(queries.principal_spend_by_period(e.f, e.kind, e.key, grain),
+                         e.f, grain)
 
     @render_widget
     def pf_models():
         e = ent()
-        return fig_split(e.w, e.p, e.cost, e.f["mode"], "model", "model")
+        return fig_split(queries.principal_spend_split(e.f, e.kind, e.key, "model"),
+                         e.f.mode, "model")
 
     @render_widget
     def pf_providers():
         e = ent()
-        return fig_split(e.w, e.p, e.cost, e.f["mode"], "provider", "provider")
+        return fig_split(queries.principal_spend_split(e.f, e.kind, e.key, "provider"),
+                         e.f.mode, "provider")
 
     @render_widget
     def pf_origins():
         e = ent()
-        return fig_split(e.w, e.p, e.cost, e.f["mode"], "source", "origin")
+        return fig_split(queries.principal_spend_split(e.f, e.kind, e.key, "source"),
+                         e.f.mode, "origin")
 
     @reactive.calc
     def rels() -> list[dict]:
         e = ent()
-        return relations(e.kind, e.key, e.w, e.cost)
+        return relations(e.f, e.kind, e.key)
 
     def rel_outputs(i: int):
         # A renderer registers under its function's name, so name each one first.
@@ -588,7 +476,7 @@ def server(input, ctx: PageContext, records_sql):
             return ui.p(note, class_="pf-note") if note else None
 
         def _chart():
-            return fig_relation(rels()[i], flt()["mode"])
+            return fig_relation(rels()[i], flt().mode)
 
         render.text(named(_title, f"pf_rel_{i}_title"))
         render.ui(named(_note, f"pf_rel_{i}_note"))
@@ -602,7 +490,7 @@ def server(input, ctx: PageContext, records_sql):
     @reactive.calc
     def convs() -> pd.DataFrame:
         e = ent()
-        return conversations(e.w, e.p, e.cost)
+        return conversations(e.f, e.kind, e.key)
 
     @reactive.calc
     def conv_frame() -> pd.DataFrame:
@@ -615,7 +503,7 @@ def server(input, ctx: PageContext, records_sql):
         df = conv_frame()
         key, order = conv_tools.conv_keys(df, by)
         groups = conv_tools.conv_groups(df, key, order)
-        return conv_tools.conv_bars_fig(groups, flt()["mode"], HIGH_PCT)
+        return conv_tools.conv_bars_fig(groups, flt().mode, HIGH_PCT)
 
     @render_widget
     def pf_conv_models():
@@ -627,12 +515,12 @@ def server(input, ctx: PageContext, records_sql):
 
     @render.ui
     def pf_conv_compare():
-        return conv_compare(conv_frame(), ent().noun, flt()["mode"])
+        return conv_compare(conv_frame(), ent().noun, flt().mode)
 
     # Every record of the picked principal, uncapped: DuckDB writes the file.
     register_sql_export(
         "pf_records",
-        lambda: records_sql(f"{ent().w} AND {ent().p}"),
+        lambda: queries.principal_records_sql(ent().f, ent().kind, ent().key),
         "profile_records.csv",
     )
 

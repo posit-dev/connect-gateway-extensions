@@ -5,14 +5,13 @@ from typing import Callable
 
 from shiny import render
 
+from filters import Filters
+
 
 @dataclass(frozen=True)
 class PageContext:
-    flt: Callable[[], dict]
-    where: Callable[..., str]
+    flt: Callable[[], Filters]
     cat: Callable[[], dict]
-    est_cost: Callable[[], str]
     register_export: Callable[..., None]
     register_sql_export: Callable[..., None]
-    est_cost_uncached: Callable[[], str]
     fitted_grid: Callable[..., render.DataGrid]

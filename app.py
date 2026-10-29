@@ -28,11 +28,11 @@ from shiny import App, reactive, render, ui
 from starlette.requests import Request
 
 import principals
+import queries
 import usage
 from pages import adoption, overview, raw_data
 from pages.context import PageContext
-from filters import TOKEN_COUNT, where
-from pricing import est_cost, est_cost_uncached
+from filters import Filters
 from theme import card_usd
 from ui_shell import (
     FAVICON, NAV_FIRST, NAV_SECTIONS, _drawer, _shell, brand,
@@ -56,11 +56,11 @@ DEFAULT_PRESET = "30d"
 
 def catalog() -> dict:
     """What the loaded data covers. Re-read after every refresh."""
+    start, end = queries.data_window()
     return {
-        "start": usage.scalar("SELECT MIN(day) FROM gateway_events").date(),
-        "end": usage.scalar("SELECT MAX(day) FROM gateway_events").date(),
-        "users": usage.q("""SELECT DISTINCT username FROM gateway_events
-                         WHERE username IS NOT NULL ORDER BY 1""")["username"].tolist(),
+        "start": start,
+        "end": end,
+        "users": queries.usernames()["username"].tolist(),
         # Choice labels for the user picker: the username, and the email beside
         # it when it adds something, so typing either finds the person.
         "user_labels": {
@@ -69,46 +69,30 @@ def catalog() -> dict:
                 if r.email and r.email != r.username
                 else r.username
             )
-            for r in usage.rows(usage.q("""SELECT username, MAX(user_email) AS email
-                                FROM gateway_events WHERE username IS NOT NULL
-                                GROUP BY 1 ORDER BY 1"""))
+            for r in usage.rows(queries.user_emails())
         },
         # Workbench sessions: the id is the value, the name (when there is one)
         # the label, so typing either finds the session.
         "session_labels": {
             r.sid: (f"{r.name} \u00b7 {r.sid}" if r.name and r.name != r.sid else r.sid)
-            for r in usage.rows(usage.q("""SELECT workbench_session_id AS sid,
-                                      MAX(workbench_session_name) AS name
-                               FROM gateway_events
-                               WHERE workbench_session_id IS NOT NULL
-                               GROUP BY 1 ORDER BY 2, 1"""))
+            for r in usage.rows(queries.sessions())
         },
-        "contents": usage.q("""SELECT DISTINCT content_guid FROM gateway_events
-                            WHERE content_guid IS NOT NULL ORDER BY 1""")[
-            "content_guid"
-        ].tolist(),
+        "contents": queries.content_guids()["content_guid"].tolist(),
         # The export has no content title; Connect's content list supplies it.
         # Typing a title, an owner or a guid finds the item.
         "content_labels": {
             r.guid: " \u00b7 ".join(
                 p for p in (usage.content_name(r.guid), r.owner, r.guid) if p
             )
-            for r in usage.rows(usage.q("""SELECT content_guid AS guid,
-                                      MAX(content_owner_username) AS owner
-                               FROM gateway_events WHERE content_guid IS NOT NULL
-                               GROUP BY 1 ORDER BY 1"""))
+            for r in usage.rows(queries.content_owners())
         },
         # Connect groups: the guid is the value, the name and size the label.
         "group_labels": {
             r.guid: f"{r.name} \u00b7 {r.members:,} members"
-            for r in usage.rows(usage.q("""SELECT group_guid AS guid, MAX(group_name) AS name,
-                                      COUNT(DISTINCT user_guid) AS members
-                               FROM user_groups GROUP BY 1 ORDER BY 2, 1"""))
+            for r in usage.rows(queries.groups())
         },
         "meta": meta_choices(),
-        "statuses": usage.q("""SELECT DISTINCT CAST(status_code AS VARCHAR) status
-                            FROM gateway_events WHERE status_code IS NOT NULL
-                            ORDER BY 1""")["status"].tolist(),
+        "statuses": queries.status_codes()["status"].tolist(),
     }
 
 
@@ -128,13 +112,7 @@ def meta_id(key: str, value: str) -> str:
 
 def meta_choices() -> dict[str, str]:
     """{choice id: label} for every user-defined metadata key/value pair."""
-    df = usage.q(
-        """SELECT k AS key, json_extract_string(request_metadata, '$."' || k || '"') AS v
-           FROM (SELECT request_metadata, unnest(json_keys(request_metadata)) AS k
-                 FROM gateway_events WHERE request_metadata IS NOT NULL)
-           WHERE NOT starts_with(k, 'workbench-') AND v IS NOT NULL
-           GROUP BY 1, 2 ORDER BY 1, 2"""
-    )
+    df = queries.metadata_pairs()
     out: dict[str, str] = {}
     for key, grp in df.groupby("key", sort=True):
         if len(grp) > META_MAX_VALUES:
@@ -453,7 +431,7 @@ def server(input, output, session):
     @render.ui
     def topbar_meta():
         info = loaded()
-        selected = int(usage.q(f"SELECT COUNT(*) n FROM gateway_events WHERE {where(flt())}").n[0])
+        selected = queries.record_count(flt())
         # Only say "of" when a filter actually narrows the records.
         records = (
             f"{selected:,} of {info['rows']:,} records"
@@ -469,11 +447,8 @@ def server(input, output, session):
     # sessions are on the Overview.
     @render.ui
     def topbar_status():
-        est = usage.scalar(
-            f"SELECT COALESCE(SUM({est_cost()}),0) FROM gateway_events WHERE {where(flt())}"
-        )
         return ui.div(
-            ui.span(f"{card_usd(est)} est. spend", class_="pill"),
+            ui.span(f"{card_usd(queries.total_spend(flt()))} est. spend", class_="pill"),
             unpriced_pill(),
             class_="topbar-right",
         )
@@ -564,25 +539,24 @@ def server(input, output, session):
         clear_link(name, update)
 
     @reactive.calc
-    def flt() -> dict:
+    def flt() -> Filters:
         c = cat()
         dates = input.date_range()
         if dates and dates[0] and dates[1]:
             start, end = dates
         else:
             start, end = preset_range(input.preset(), c["start"], c["end"])
-        return {
-            "start": start,
-            "end": end,
-            "all_users": c["users"],
-            "all_contents": c["contents"],
-            "groups": list(input.f_groups() or []),
-            "users": list(input.f_users() or []),
-            "contents": list(input.f_contents() or []),
-            "sessions": list(input.f_sessions() or []),
-            "meta": list(input.f_meta() or []),
-            "mode": "dark",
-        }
+        return Filters(
+            start=start,
+            end=end,
+            all_users=tuple(c["users"]),
+            all_contents=tuple(c["contents"]),
+            groups=tuple(input.f_groups() or ()),
+            users=tuple(input.f_users() or ()),
+            contents=tuple(input.f_contents() or ()),
+            sessions=tuple(input.f_sessions() or ()),
+            meta=tuple(input.f_meta() or ()),
+        )
 
     # ---- unpriced check: the topbar warning ----------------------------------
     def unpriced_pill():
@@ -618,13 +592,7 @@ def server(input, output, session):
     @reactive.calc
     def unpriced_df() -> pd.DataFrame:
         """Models that carried tokens but cost $0 because the catalog has no price."""
-        f = flt()
-        return usage.q(f"""SELECT model, COUNT(*) requests
-                         FROM gateway_events
-                         WHERE {where(f)} AND model IS NOT NULL AND model <> ''
-                         GROUP BY 1
-                         HAVING SUM({est_cost()}) = 0 AND SUM({TOKEN_COUNT}) > 0
-                         ORDER BY 2 DESC""")
+        return queries.unpriced_models(flt())
 
     # ---- exports ------------------------------------------------------------
     def register_export(name: str, df_fn, filename: str):
@@ -657,14 +625,14 @@ def server(input, output, session):
         output(id=f"dl_{name}", suspend_when_hidden=False)(renderer)
 
     page_ctx = PageContext(
-        flt=flt, where=where, cat=cat, est_cost=est_cost,
+        flt=flt, cat=cat,
         register_export=register_export, register_sql_export=register_sql_export,
-        est_cost_uncached=est_cost_uncached, fitted_grid=fitted_grid,
+        fitted_grid=fitted_grid,
     )
     overview.server(input, page_ctx)
-    records_sql = raw_data.server(input, page_ctx)
+    raw_data.server(input, page_ctx)
 
-    principals.server(input, page_ctx, records_sql)
+    principals.server(input, page_ctx)
     adoption.server(input, page_ctx)
 
 

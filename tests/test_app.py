@@ -17,9 +17,7 @@ from conftest import ROOT, _free_port
 
 def test_ui_has_every_page_and_output(loaded):
     import app
-    import pricing
 
-    assert app.est_cost is pricing.est_cost
     html = str(app.app_ui(None))
     for output_id in (
         "main_tabs", "date_range", "f_users",

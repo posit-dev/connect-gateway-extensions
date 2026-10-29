@@ -32,6 +32,8 @@ import duckdb
 import pandas as pd
 import pytest
 
+from filters import Filters
+
 ROOT = Path(__file__).resolve().parents[1]
 
 # The window every export-shaping test reads with: all of September 2026.
@@ -245,18 +247,16 @@ def loaded(fake_connect: str) -> ModuleType:
 
 
 @pytest.fixture
-def f(loaded) -> dict:
-    """The filter dict for the app's default window with nothing narrowed."""
+def f(loaded) -> Filters:
+    """The filters for the app's default window with nothing narrowed."""
     import app
 
     c = app.catalog()
     start, end = app.preset_range(app.DEFAULT_PRESET, c["start"], c["end"])
-    return {
-        "start": start, "end": end,
-        "all_users": c["users"], "all_contents": c["contents"], "groups": [],
-        "users": [], "contents": [], "sessions": [], "meta": [],
-        "mode": "dark",
-    }
+    return Filters(
+        start=start, end=end,
+        all_users=tuple(c["users"]), all_contents=tuple(c["contents"]),
+    )
 
 
 @pytest.fixture(scope="session")

@@ -11,8 +11,7 @@ from shiny import reactive, render, ui
 from shinywidgets import output_widget
 
 import theme
-import usage
-from filters import dim_sql, sql_str
+import queries
 from pages.context import PageContext
 from theme import apply, card_num, color, empty_fig, render_widget
 from ui_shell import empty_note, help_icon, page_header, plural, table_header
@@ -112,7 +111,7 @@ def panel():
 
 
 def server(input, ctx: PageContext):
-    flt, where, cat = ctx.flt, ctx.where, ctx.cat
+    flt, cat = ctx.flt, ctx.cat
 
     def kind() -> str:
         k = input.adoption_kind()
@@ -134,23 +133,7 @@ def server(input, ctx: PageContext):
         start with an empty MAU), but not past the loaded data. The date range
         is the only filter lifted; everything else still applies.
         """
-        f, col = flt(), KIND_COL[kind()]
-        wide = {**f, "start": cat()["start"]}
-        return usage.q(f"""
-            WITH days AS (
-                SELECT CAST(d AS DATE) AS d
-                FROM generate_series(DATE '{f["start"]}', DATE '{f["end"]}',
-                                     INTERVAL 1 DAY) t(d)),
-            ev AS (SELECT DISTINCT day, {col} AS who FROM gateway_events
-                   WHERE {where(wide)} AND {col} IS NOT NULL)
-            SELECT days.d AS day,
-                   COUNT(DISTINCT CASE WHEN ev.day = days.d THEN ev.who END) AS dau,
-                   COUNT(DISTINCT CASE WHEN ev.day > days.d - INTERVAL 7 DAY
-                                       THEN ev.who END) AS wau,
-                   COUNT(DISTINCT ev.who) AS mau
-            FROM days LEFT JOIN ev
-              ON ev.day <= days.d AND ev.day > days.d - INTERVAL 30 DAY
-            GROUP BY 1 ORDER BY 1""")
+        return queries.active_principals(flt(), KIND_COL[kind()], cat()["start"])
 
     @render.ui
     def adoption_kpis():
@@ -221,8 +204,8 @@ def server(input, ctx: PageContext):
     def adoption_lines():
         f, df, noun = flt(), adoption_df(), KIND_NOUN[kind()]
         if df.empty or not df.mau.max():
-            return empty_fig(f["mode"], f"No active {noun} in this view")
-        series = theme.TOKENS[f["mode"]]["series"]
+            return empty_fig(f.mode, f"No active {noun} in this view")
+        series = theme.TOKENS[f.mode]["series"]
         names = active_names(kind())
         fig = go.Figure()
         for col, c in [("dau", series[0]), ("wau", series[2]), ("mau", series[1])]:
@@ -233,7 +216,7 @@ def server(input, ctx: PageContext):
                 hovertemplate=f"<b>%{{y:,}}</b> {name}<extra></extra>",
             )
         fig.update_yaxes(rangemode="tozero")
-        return apply(fig, f["mode"], height=380, time_axis=True, showlegend=True,
+        return apply(fig, f.mode, height=380, time_axis=True, showlegend=True,
                      y_title=f"active {noun}", hover=True)
 
     def active_by(dim: str, grain: str, nothing: str):
@@ -241,23 +224,14 @@ def server(input, ctx: PageContext):
         day, week or month. The six with the most get a line; the rest are "Other"."""
         f = flt()
         col, noun = KIND_COL[kind()], KIND_NOUN[kind()]
-        # Requests with no User-Agent are a line of their own: on a server whose
-        # callers send none, leaving them out made the chart look empty.
-        k = dim_sql(dim)
-        base = f"FROM gateway_events WHERE {where(f)} AND {col} IS NOT NULL AND {k} <> ''"
-        top = usage.q(f"""SELECT {k} AS k {base} GROUP BY 1
-                          ORDER BY COUNT(DISTINCT {col}) DESC LIMIT 6""").k.tolist()
+        top = queries.top_by_active(f, col, dim)
         if not top:
-            return empty_fig(f["mode"], nothing)
-        keep = ",".join(sql_str(x) for x in top)
-        df = usage.q(f"""SELECT date_trunc('{grain}', day)::DATE AS b,
-                                CASE WHEN {k} IN ({keep}) THEN {k} ELSE 'Other' END AS k,
-                                COUNT(DISTINCT {col}) AS users, COUNT(*) AS requests
-                         {base} GROUP BY 1, 2 ORDER BY 1""")
+            return empty_fig(f.mode, nothing)
+        df = queries.active_by_bucket(f, col, dim, grain, top)
         fig = go.Figure()
         for k in top + (["Other"] if "Other" in set(df.k) else []):
             d = df[df.k == k]
-            c = theme.TOKENS[f["mode"]]["muted"] if k == "Other" else color(dim, k, f["mode"])
+            c = theme.TOKENS[f.mode]["muted"] if k == "Other" else color(dim, k, f.mode)
             fig.add_scatter(
                 x=d.b, y=d.users, name=k, mode="lines+markers",
                 line={"width": 2.5, "color": c},
@@ -266,7 +240,7 @@ def server(input, ctx: PageContext):
                 hovertemplate=f"<b>%{{y:,}}</b> {noun} \u00b7 %{{customdata:,}} requests \u00b7 {k}<extra></extra>",
             )
         fig.update_yaxes(rangemode="tozero")
-        return apply(fig, f["mode"], height=340, time_axis=True, showlegend=True,
+        return apply(fig, f.mode, height=340, time_axis=True, showlegend=True,
                      y_title=f"active {noun} / {grain}", hover=True)
 
     @render_widget
