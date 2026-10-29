@@ -1,4 +1,4 @@
-"""LLM audit dashboard for the Connect AI Gateway.
+"""Usage dashboard for the Posit AI Gateway.
 
 Single data source: `gateway_events` — one row per gateway LLM call, metadata
 only (see `usage.py`). Every page reports Connect content and Workbench calls
