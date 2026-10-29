@@ -187,12 +187,15 @@ def denied_page(reason: str) -> ui.Tag:
             ui.include_css(Path(__file__).parent / "www" / "shell.css"),
         ),
         ui.div(
-            ui.div(brand(), class_="denied-brand"),
-            ui.h4("Access denied"),
-            ui.p(reason),
-            class_="denied-card",
+            ui.div(ui.div(brand(), class_="topbar-brand"), class_="topbar"),
+            ui.div(
+                ui.div(ui.h4("Access denied"), ui.p(reason), class_="denied-card"),
+                class_="denied-body",
+            ),
+            class_="app-shell",
         ),
-        class_="denied-page",
+        class_="p-0",
+        title="Posit AI Gateway Usage",
     )
 
 
