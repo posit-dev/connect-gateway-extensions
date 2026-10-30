@@ -19,6 +19,7 @@ Run:  .venv/bin/shiny run app:app --port 8000
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 from datetime import date, timedelta
 from pathlib import Path
@@ -626,7 +627,7 @@ def server(input, output, session):
     # ---- exports ------------------------------------------------------------
     def register_export(name: str, df_fn, filename: str):
         def _export():
-            yield df_fn().to_csv(index=False)
+            yield from usage.safe_csv(io.StringIO(df_fn().to_csv(index=False)))
 
         # the downloads registry keys off the function name, so name it to match the button id
         _export.__name__ = f"dl_{name}"
@@ -636,16 +637,15 @@ def server(input, output, session):
     def register_sql_export(name: str, query_fn, filename: str):
         """A CSV download for a query that can return a very large result.
 
-        DuckDB writes the file and it is streamed out in 1 MB pieces, so the
-        whole export is never held in memory.
+        DuckDB writes the file; safe_csv escapes formula-like text while
+        streaming it, so the whole export is never held in memory.
         """
 
         def _export():
             path = usage.export_csv(query_fn())
             try:
-                with open(path, "rb") as fh:
-                    while chunk := fh.read(1 << 20):
-                        yield chunk
+                with open(path, encoding="utf-8", newline="") as fh:
+                    yield from usage.safe_csv(fh)
             finally:
                 path.unlink(missing_ok=True)
 

@@ -43,8 +43,10 @@ app's working directory so a restarted process can reuse its existing rows.
 from __future__ import annotations
 
 import contextlib
+import csv
 import hashlib
 import http.client
+import io
 import json
 import os
 import re
@@ -1126,6 +1128,25 @@ def rows(df: pd.DataFrame) -> Iterable[Any]:
     """df.itertuples(), typed so a row's columns read as attributes."""
     return df.itertuples()
 
+
+
+def safe_csv(source: Iterable[str]) -> Iterable[str]:
+    """Stream a CSV without letting text cells become spreadsheet formulas."""
+    out = io.StringIO()
+    writer = csv.writer(out)
+    for row in csv.reader(source):
+        writer.writerow([
+            "'" + cell if cell.lstrip(" \t\r\n").startswith(("=", "+", "-", "@"))
+            and not re.fullmatch(r"-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", cell)
+            else cell
+            for cell in row
+        ])
+        if out.tell() >= 1 << 16:
+            yield out.getvalue()
+            out.seek(0)
+            out.truncate()
+    if out.tell():
+        yield out.getvalue()
 
 
 def export_csv(query: Query) -> Path:

@@ -1,5 +1,7 @@
 """Pure helpers: no Connect, no DuckDB session, no Shiny."""
 
+import csv
+import io
 from dataclasses import replace
 from datetime import date
 
@@ -329,6 +331,24 @@ def test_outliers_ignore_a_flat_field():
 def test_outliers_need_enough_priced_peers():
     # Seven with spend, and zero-spend rows do not count towards the eight.
     assert not principals.outliers(_peers([1, 1, 1, 1, 1, 1, 50, 0, 0])).any()
+
+
+# ---- CSV downloads ---------------------------------------------------------------
+def test_safe_csv_escapes_formulas_without_changing_numbers_or_multiline_cells():
+    source = io.StringIO()
+    csv.writer(source).writerows([
+        ["name", "amount", "metadata"],
+        ["=HYPERLINK(\"https://example.com\")", "-12.50", "  @SUM(1,2)"],
+        ["+evil", "-1e3", "line one\n=evil"],
+        ["ordinary", "0", "plain, quoted"],
+    ])
+    rows = list(csv.reader(io.StringIO("".join(usage.safe_csv(io.StringIO(source.getvalue()))))))
+    assert rows == [
+        ["name", "amount", "metadata"],
+        ["'=HYPERLINK(\"https://example.com\")", "-12.50", "'  @SUM(1,2)"],
+        ["'+evil", "-1e3", "line one\n=evil"],
+        ["ordinary", "0", "plain, quoted"],
+    ]
 
 
 # ---- filters.where: date edges ----------------------------------------------------

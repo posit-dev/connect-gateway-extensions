@@ -57,6 +57,7 @@ def denial(headers) -> str | None:
                 "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
                 "subject_token": token,
                 "subject_token_type": "urn:posit:connect:user-session-token",
+                "requested_token_type": "urn:posit:connect:api-key",
             },
         )
         user = _request(

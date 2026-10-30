@@ -96,6 +96,20 @@ def test_adoption_content_toggle_relabels_the_page(app_server):
         assert reply.values.get(out) is not None, out
 
 
+def test_invalid_chart_grains_cannot_reach_sql(app_server, loaded):
+    user = loaded.q("SELECT username FROM gateway_events WHERE username IS NOT NULL LIMIT 1").username[0]
+
+    async def scenario(session: Session, first: Reply, html: str):
+        return await session.update(pf_grain="day'); SELECT 1; --",
+                                    tool_grain="week'); SELECT 1; --",
+                                    model_grain="month'); SELECT 1; --")
+
+    reply = visit(app_server, scenario, main_tabs="Attribution", pf_kind="user", pf_pick=user)
+    assert reply.errors == {}
+    for output in ("pf_trend", "tool_time", "model_time"):
+        assert reply.values.get(output) is not None, output
+
+
 def test_overview_starts_ungrouped_as_one_series_of_the_whole_spend(app_server):
     reply = visit(app_server, first_view)
     assert reply.errors == {}
