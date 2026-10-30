@@ -442,7 +442,8 @@ def server(input, ctx: PageContext):
     @render_widget
     def pf_trend():
         e = ent()
-        grain = input.pf_grain() or "day"
+        grain = input.pf_grain()
+        grain = grain if grain in ("day", "week", "month") else "day"
         return fig_trend(queries.principal_spend_by_period(e.f, e.kind, e.key, grain),
                          e.f, grain)
 

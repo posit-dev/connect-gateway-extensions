@@ -2,7 +2,12 @@
 
 Single data source: `gateway_events` — one row per gateway LLM call, metadata
 only (see `usage.py`). Every page reports Connect content and Workbench calls
-together; the Overview breaks the spend down by origin.
+together; the Overview breaks the spend down by origin. Each session loads its
+own copy with the visitor's API key (see `access.py`), so nothing is read, and
+nothing is kept, for anyone who is not looking.
+
+The page is built empty and filled in once the data has loaded. Everything that
+reads a filter waits on `cat()`, which waits for the load.
 
 The user axis is the principal `usage.py` derives from the three identities the
 gateway records: the viewer the content acted for, else the person whose
@@ -19,14 +24,18 @@ Run:  .venv/bin/shiny run app:app --port 8000
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import logging
 from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
-from shiny import App, reactive, render, ui
+from shiny import App, reactive, render, req, ui
+from shiny.types import SilentException
 from starlette.requests import Request
 
+import access
 import principals
 import queries
 import usage
@@ -53,9 +62,17 @@ PRESETS = {
 
 DEFAULT_PRESET = "30d"
 
+# The reason a load failed can name the Connect server and quote its reply, so
+# it goes to the log, and the page says only where to look.
+LOAD_FAILED = (
+    "The usage data could not be loaded. This content's log on Connect says why."
+)
+
+logger = logging.getLogger(__name__)
+
 
 def catalog() -> dict:
-    """What the loaded data covers. Re-read after every refresh."""
+    """What the loaded data covers."""
     start, end = queries.data_window()
     return {
         "start": start,
@@ -122,11 +139,6 @@ def meta_choices() -> dict[str, str]:
     return out
 
 
-# The first load runs here, when the app is imported, because the UI below is
-# built from what was loaded. usage itself has no import side effects.
-usage.load()
-CATALOG = catalog()  # seeds the input choices; the server tracks it reactively
-
 
 def fitted_grid(df: pd.DataFrame, **kw) -> render.DataGrid:
     """A grid sized to its rows, that scrolls once there are many of them.
@@ -156,6 +168,21 @@ def preset_range(preset: str, start: date, end: date) -> tuple[date, date]:
     return max(lo, start), hi
 
 
+def picked_dates(value) -> tuple[date, date] | None:
+    """A date range input's value as two dates, or None when it holds no range.
+
+    A date input can arrive as text, from a bookmark or a plain client, and a
+    bookmark is a URL anyone can edit.
+    """
+    try:
+        start, end = (date.fromisoformat(d) if isinstance(d, str) else d for d in value)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(start, date) and isinstance(end, date):
+        return start, end
+    return None
+
+
 
 # The drawer's filters: the input is f_<name> and its clear link clear_<name>.
 # Each has the function that updates it and the choices it takes from a catalog.
@@ -177,7 +204,33 @@ def with_clear(name: str, control: ui.Tag) -> ui.Tag:
     )
 
 
+def denied_page(reason: str) -> ui.Tag:
+    """Why this visitor sees no dashboard, in the dashboard's own look."""
+    return ui.page_fluid(
+        ui.head_content(
+            ui.tags.script("document.documentElement.setAttribute('data-bs-theme', 'dark');"),
+            ui.include_css(Path(__file__).parent / "www" / "styles.css"),
+            ui.include_css(Path(__file__).parent / "www" / "shell.css"),
+        ),
+        ui.div(
+            ui.div(ui.div(brand(), class_="topbar-brand"), class_="topbar"),
+            ui.div(
+                ui.div(ui.h4("Access denied"), ui.p(reason), class_="denied-card"),
+                class_="denied-body",
+            ),
+            class_="app-shell",
+        ),
+        class_="p-0",
+        title="Posit AI Gateway Usage",
+    )
+
+
 def app_ui(request: Request | None):
+    try:
+        access.visitor_key(request.headers if request else {})
+    except access.Denied as denied:
+        return denied_page(str(denied))
+    # The choices start empty and are filled in once the data has loaded.
     return _shell(
         overview.panel(),
         principals.panel(),
@@ -187,28 +240,28 @@ def app_ui(request: Request | None):
             with_clear("users", ui.input_selectize(
                 "f_users",
                 filter_label("Users", "users"),
-                CATALOG["user_labels"],
+                {},
                 multiple=True,
                 options={"placeholder": "all users \u2014 type a name or email"},
             )),
             with_clear("contents", ui.input_selectize(
                 "f_contents",
                 filter_label("Content", "content"),
-                CATALOG["content_labels"],
+                {},
                 multiple=True,
                 options={"placeholder": "all content \u2014 type a title, owner or guid"},
             )),
             with_clear("sessions", ui.input_selectize(
                 "f_sessions",
                 filter_label("Session", "session"),
-                CATALOG["session_labels"],
+                {},
                 multiple=True,
                 options={"placeholder": "all sessions \u2014 type a name or id"},
             )),
             with_clear("groups", ui.input_selectize(
                 "f_groups",
                 filter_label("Connect groups", "groups"),
-                CATALOG["group_labels"],
+                {},
                 multiple=True,
                 options={"placeholder": "all groups \u2014 type a group name"},
             )),
@@ -216,7 +269,7 @@ def app_ui(request: Request | None):
             # Keys Workbench writes itself (workbench-*) are not offered.
             with_clear("meta", ui.div(
                 ui.input_checkbox_group(
-                    "f_meta", filter_label("Custom Metadata", "meta"), CATALOG["meta"]
+                    "f_meta", filter_label("Custom Metadata", "meta"), {}
                 ),
                 class_="filter-meta",
             )),
@@ -247,9 +300,10 @@ def app_ui(request: Request | None):
             ui.tags.link(rel="icon", type="image/svg+xml", href="favicon.svg"),
             ui.include_css(Path(__file__).parent / "www" / "styles.css"),
             ui.include_css(Path(__file__).parent / "www" / "shell.css"),
-            # A loading bar over the page until the first views are drawn. The
-            # first session is slow; shiny:idle fires once the server has no
-            # work left, which is when the page is ready to look at.
+            # A loading bar over the page until the data has loaded. Every
+            # session reads the export for itself, which takes tens of seconds,
+            # and the page is already idle while it does; the server sends
+            # "loaded" when the load has finished or failed.
             ui.tags.script(
                 """
                 document.addEventListener("DOMContentLoaded", function () {
@@ -257,11 +311,12 @@ def app_ui(request: Request | None):
                   o.className = "first-load";
                   o.innerHTML = '<div class="first-load-bar"></div><div>Loading usage data\u2026</div>';
                   document.body.appendChild(o);
-                  function hide() {
+                  function hide(_msg) {
                     o.classList.add("done");
                     setTimeout(function () { o.remove(); }, 400);
                   }
-                  $(document).one("shiny:idle shiny:disconnected", hide);
+                  Shiny.addCustomMessageHandler("loaded", hide);
+                  $(document).one("shiny:disconnected", hide);
                 });
                 """
             ),
@@ -335,15 +390,20 @@ def app_ui(request: Request | None):
             ),
         ),
         title=brand(),
-        catalog=CATALOG,
         presets=PRESETS,
         default_preset=DEFAULT_PRESET,
-        preset_range=preset_range,
         fillable=False,
     )
 
 
 def server(input, output, session):
+    try:
+        key = access.visitor_key(session.http_conn.headers)
+    except access.Denied:
+        return
+    dataset = usage.Dataset(key)
+    usage.attach(session, dataset)
+
     # Integrate bookmarking callbacks
     @session.bookmark.on_bookmarked
     async def _(url: str):
@@ -363,6 +423,20 @@ def server(input, output, session):
         if tab is None or tab in {n for _, names in NAV_SECTIONS for n in names}:
             return
         ui.update_navset("main_tabs", selected=_LEGACY_TABS.get(tab, NAV_FIRST))
+
+    # The filters have no choices until the data has loaded, so a browser cannot
+    # hold a bookmarked pick yet and reports none. They are kept here and put
+    # back once the choices exist (see _loaded).
+    bookmarked: dict[str, list] = {}
+
+    @session.bookmark.on_restored
+    def _keep_filters(state):
+        # A bookmark is a URL anyone can edit; a pick that is not a list of
+        # strings is dropped.
+        for name in FILTERS:
+            picks = state.input.get(f"f_{name}")
+            ok = isinstance(picks, list) and all(isinstance(x, str) for x in picks)
+            bookmarked[name] = picks if ok else []
 
     _BOOKMARKABLE_INPUTS = {
         "preset",
@@ -415,6 +489,8 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.date_range, ignore_init=True)
     def _dates_to_preset():
+        # The browser has reported dates since _loaded set them, so read its own.
+        sent_dates.set(None)
         c = cat()
         got = tuple(input.date_range() or ())
         match = next(
@@ -431,6 +507,8 @@ def server(input, output, session):
     @render.ui
     def topbar_meta():
         info = loaded()
+        if info is None:
+            raise SilentException
         selected = queries.record_count(flt())
         # Only say "of" when a filter actually narrows the records.
         records = (
@@ -453,69 +531,66 @@ def server(input, output, session):
             class_="topbar-right",
         )
 
-    # bumped by a refresh; every query depends on it through flt()
-    loaded = reactive.value(usage.INFO.copy())
+    # What the load read, or None until it has. Every query waits on it through
+    # cat() and flt().
+    loaded: reactive.Value[dict | None] = reactive.Value(None)
 
     @reactive.calc
     def cat() -> dict:
-        loaded()
+        req(loaded())
         return catalog()
 
-    # The reload runs in a worker thread: it waits on Connect's export for tens of
-    # seconds, and on the event loop that froze the session with no sign that
-    # anything was happening. The task button reads "Refreshing…" meanwhile, and
-    # usage.load holds its own locks, so pages keep querying the old table.
-    @ui.bind_task_button(button_id="refresh")
+    # The dates _loaded put in the picker, until the browser next reports its
+    # dates. Until then the input still holds what the page opened with, which a
+    # browser fills with today's date, not with the dates the data covers.
+    sent_dates: reactive.Value[tuple[date, date] | None] = reactive.Value(None)
+
+    # The load runs in a worker thread: it waits on Connect's export for tens of
+    # seconds, and on the event loop that would freeze the session. The page
+    # shows its loading bar meanwhile.
     @reactive.extended_task
-    async def reload_task() -> dict:
-        return await asyncio.to_thread(usage.load)
+    async def load_task() -> dict:
+        return await asyncio.to_thread(dataset.load)
+
+    # No reactive inputs, so it runs once, when the session starts.
+    @reactive.effect
+    def _start_load():
+        load_task()
 
     @reactive.effect
-    # ignore_init, or opening the dashboard would re-read the export every time
-    @reactive.event(input.refresh, ignore_init=True)
-    def _refresh():
-        reload_task()
-
-    @reactive.effect
-    @reactive.event(reload_task.status, ignore_init=True)
-    def _refreshed():
-        status = reload_task.status()
-        if status == "error":
-            # the reload rolled back, so the loaded data is still intact
-            ui.notification_show(
-                f"Refresh failed — showing the data from "
-                f"{loaded()['loaded_at']:%H:%M UTC}. {reload_task.error.get()}",
-                type="error",
-                duration=15,
-            )
+    @reactive.event(load_task.status, ignore_init=True)
+    async def _loaded():
+        if load_task.status() not in ("success", "error"):
             return
-        if status != "success":
-            return
-        info = reload_task.value.get()
-        c = catalog()
-        # A selection that no longer exists in the reloaded data is dropped; an
-        # empty result means no narrowing, the same as the initial state.
-        for name, (update, choices_of) in FILTERS.items():
-            choices = choices_of(c)
-            update(
-                f"f_{name}",
-                choices=choices,
-                selected=[x for x in input[f"f_{name}"]() or [] if x in choices],
-            )
-        # Bounds follow the new window; the chip's dates are re-resolved against it.
-        ui.update_date_range("date_range", min=c["start"], max=c["end"])
-        if input.preset() != "custom":
-            s, e = preset_range(input.preset(), c["start"], c["end"])
-            ui.update_date_range("date_range", start=s, end=e)
-        loaded.set(info.copy())
-        what = (
-            f"{info['fetched']:,} new or updated"
-            if info.get("mode") == "incremental"
-            else "full window re-read"
-        )
-        ui.notification_show(
-            f"Loaded {info['rows']:,} records ({what})", type="message", duration=4
-        )
+        # Whatever happens here, the page is told, so its loading bar goes.
+        try:
+            info = load_task.result()  # raises what the load raised
+            c = catalog()
+            # Fill in the inputs the page was built with empty, with what a
+            # bookmark picked. Picks that are not in this data are dropped, and
+            # an empty result means no narrowing.
+            for name, (update, choices_of) in FILTERS.items():
+                choices = choices_of(c)
+                update(
+                    f"f_{name}",
+                    choices=choices,
+                    selected=[x for x in bookmarked.get(name, []) if x in choices],
+                )
+            if input.preset() == "custom":
+                # A bookmark's own dates, moved inside the data this session read.
+                s, e = picked_dates(input.date_range()) or (c["start"], c["end"])
+                s, e = (min(max(d, c["start"]), c["end"]) for d in (s, e))
+            else:
+                s, e = preset_range(input.preset(), c["start"], c["end"])
+            # The picker has had no bounds until now: give them with the dates.
+            ui.update_date_range("date_range", start=s, end=e, min=c["start"], max=c["end"])
+            sent_dates.set((s, e))
+            loaded.set(info)
+        except Exception:
+            logger.exception("The usage data could not be loaded")
+            ui.notification_show(LOAD_FAILED, type="error", duration=None)
+        finally:
+            await session.send_custom_message("loaded", {})
 
     @reactive.effect
     @reactive.event(input.clear_all)
@@ -541,12 +616,11 @@ def server(input, output, session):
     @reactive.calc
     def flt() -> Filters:
         c = cat()
-        dates = input.date_range()
-        if dates and dates[0] and dates[1]:
-            # A date input can arrive as text, from a bookmark or a plain client.
-            start, end = (date.fromisoformat(d) if isinstance(d, str) else d for d in dates)
-        else:
-            start, end = preset_range(input.preset(), c["start"], c["end"])
+        start, end = (
+            sent_dates()
+            or picked_dates(input.date_range())
+            or preset_range(input.preset(), c["start"], c["end"])
+        )
         return Filters(
             start=start,
             end=end,
@@ -598,7 +672,7 @@ def server(input, output, session):
     # ---- exports ------------------------------------------------------------
     def register_export(name: str, df_fn, filename: str):
         def _export():
-            yield df_fn().to_csv(index=False)
+            yield from usage.safe_csv(io.StringIO(df_fn().to_csv(index=False)))
 
         # the downloads registry keys off the function name, so name it to match the button id
         _export.__name__ = f"dl_{name}"
@@ -608,16 +682,15 @@ def server(input, output, session):
     def register_sql_export(name: str, query_fn, filename: str):
         """A CSV download for a query that can return a very large result.
 
-        DuckDB writes the file and it is streamed out in 1 MB pieces, so the
-        whole export is never held in memory.
+        DuckDB writes the file; safe_csv escapes formula-like text while
+        streaming it, so the whole export is never held in memory.
         """
 
         def _export():
-            path = usage.export_csv(query_fn())
+            path = dataset.export_csv(query_fn())
             try:
-                with open(path, "rb") as fh:
-                    while chunk := fh.read(1 << 20):
-                        yield chunk
+                with open(path, encoding="utf-8", newline="") as fh:
+                    yield from usage.safe_csv(fh)
             finally:
                 path.unlink(missing_ok=True)
 

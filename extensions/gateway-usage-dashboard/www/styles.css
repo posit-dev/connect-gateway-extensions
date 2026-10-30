@@ -352,11 +352,9 @@ body .card-body shiny-data-frame .shiny-data-grid {
   margin-right: auto;
 }
 
-/* ---- refresh control ----------------------------------------------------- */
-.refresh-btn { white-space: nowrap; }
-/* Quieter than Refresh: two identical buttons stacked would give a discarding
-   action the same weight as the one that loads data. `.btn.` is needed to outrank
-   the `.btn.action-button` accent treatment above. */
+/* A quiet button: a discarding action should not weigh as much as the accent
+   ones. `.btn.` is needed to outrank the `.btn.action-button` accent treatment
+   above. */
 .btn.clear-all-btn {
   margin-top: 6px; width: 100%;
   background: var(--surface-1); border: 1px solid var(--hairline-strong);

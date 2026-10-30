@@ -7,11 +7,8 @@ package usagelog
 //
 // It lays down usage-log JSONL the way the writer does (Record lines under
 // date=<ingest day>/node=<node>/events.jsonl), then asks ExportStore for the
-// window at two watermarks and copies each Parquet file to DASHBOARD_FIXTURE_OUT:
-//
-//   connect_export.parquet        as_of 2026-10-01: every record below
-//   connect_export_early.parquet  as_of 2026-09-20T12:00: what a load at that
-//                                 time saw, for incremental-merge tests
+// window as of 2026-10-01 and copies the Parquet file to DASHBOARD_FIXTURE_OUT
+// as connect_export.parquet: every record below.
 //
 // Each record's response_id names the case it covers; tests/test_connect_export.py
 // relies on them.
@@ -136,9 +133,8 @@ func fixtureRecords() []Record {
 			r.UserAgent = nil
 			r.RequestMetadata = nil
 		}),
-		// Ingested just after the early export's watermark minus the refetch margin.
 		fixtureRecord("near-cutoff", "2026-09-20T11:55:00Z", "2026-09-20T11:55:05Z", nil),
-		// Started early in the month, ingested only after the early export.
+		// Started early in the month, ingested weeks later.
 		fixtureRecord("late-ingest", "2026-09-05T09:00:00Z", "2026-09-21T09:00:00Z", nil),
 		fixtureRecord("after-early", "2026-09-22T15:00:00Z", "2026-09-22T15:00:01Z", func(r *Record) {
 			r.NodeName = "connect-02"
@@ -197,20 +193,15 @@ func TestDashboardFixture(t *testing.T) {
 		Dir: dir, NodeName: "connect-01", Now: func() time.Time { return now },
 	})
 	window := Window{From: at("2026-09-01T00:00:00Z"), To: at("2026-10-01T00:00:00Z")}
-	for name, asOf := range map[string]string{
-		"connect_export.parquet":       "2026-10-01T00:00:00Z",
-		"connect_export_early.parquet": "2026-09-20T12:00:00Z",
-	} {
-		exp, err := store.Get(context.Background(), Spec{Window: window, asOf: at(asOf)})
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		body, err := os.ReadFile(exp.Path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(out, name), body, 0644); err != nil {
-			t.Fatal(err)
-		}
+	exp, err := store.Get(context.Background(), Spec{Window: window, asOf: at("2026-10-01T00:00:00Z")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(exp.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "connect_export.parquet"), body, 0644); err != nil {
+		t.Fatal(err)
 	}
 }
