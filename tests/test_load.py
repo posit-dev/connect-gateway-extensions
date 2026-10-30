@@ -1,8 +1,15 @@
-"""Loading from the fake Connect: refreshes, and paged Connect lists."""
+"""Loading from the fake Connect: the export window, and paged Connect lists."""
 
 import urllib.parse
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from shiny.session import session_context
 
 import usage
+from conftest import stub_session
+
+NOW = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
 
 
 def test_export_url_names_the_window_and_watermark():
@@ -15,12 +22,41 @@ def test_export_url_names_the_window_and_watermark():
     }
 
 
-def test_refresh_merges_the_full_window_without_duplicates(loaded):
-    before = loaded.INFO["rows"]
-    info = loaded.load()
-    assert info["mode"] == "incremental"
-    # The fake's export never changes, so a merge must add nothing net.
-    assert info["rows"] == before
+def test_window_follows_the_passed_clock():
+    def parse(ts):
+        return datetime.strptime(ts, usage._RFC3339)
+
+    window_from, window_to, as_of = usage._window(NOW)
+    expected = (NOW - usage.AS_OF_LAG).replace(second=0, tzinfo=None)
+    assert parse(as_of) == parse(window_to) == expected
+    assert parse(window_from) == expected - timedelta(days=usage.LOOKBACK_DAYS)
+
+
+def test_load_reports_what_it_read(loaded):
+    assert loaded.info["rows"] == loaded.scalar("SELECT COUNT(*) FROM gateway_events")
+    assert loaded.info["rows"] > 0
+    assert loaded.info["priced_models"] > 0
+
+
+def test_every_request_carries_the_key_the_dataset_was_given(fake_connect, monkeypatch):
+    import urllib.request
+
+    sent = []
+    real = urllib.request.urlopen
+
+    def spy(req, *args, **kwargs):
+        sent.append(req.get_header("Authorization"))
+        return real(req, *args, **kwargs)
+
+    monkeypatch.setattr(urllib.request, "urlopen", spy)
+    monkeypatch.setenv("CONNECT_API_KEY", "the owner's key")
+    ds = usage.Dataset("visitor")
+    try:
+        ds.load()
+    finally:
+        ds.close()
+    assert len(sent) > 3  # export, prices, content, groups, ...
+    assert set(sent) == {"Key visitor"}
 
 
 def test_group_members_read_across_capped_pages(loaded):
@@ -29,102 +65,29 @@ def test_group_members_read_across_capped_pages(loaded):
     groups = loaded.scalar("SELECT COUNT(DISTINCT group_guid) FROM user_groups")
     members = loaded.scalar("SELECT COUNT(*) FROM user_groups")
     assert groups > 3
-    assert members == len(loaded.GROUP_MEMBERS)
+    assert members == len(loaded.group_members)
     assert members > groups * 3
 
 
 def test_content_names_loaded(loaded):
-    assert loaded.CONTENT_NAMES
-    assert loaded.scalar("SELECT COUNT(*) FROM content_names") == len(loaded.CONTENT_NAMES)
+    assert loaded.content_names
+    assert loaded.scalar("SELECT COUNT(*) FROM content_names") == len(loaded.content_names)
 
 
-# ---- full vs. incremental ---------------------------------------------------
-
-from datetime import datetime, timedelta, timezone
-
-import pytest
-
-NOW = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
-FROM = "2026-09-01T00:00:00Z"
-
-
-def _state(as_of=NOW - timedelta(minutes=5), full_at=NOW - timedelta(hours=1)):
-    return {"as_of": as_of, "full_at": full_at}
-
-
-def _stamp(t):
-    return t.strftime(usage._RFC3339)
+def test_queries_read_the_dataset_of_their_own_session(loaded):
+    other, session = usage.Dataset("test"), stub_session("other")
+    other.load()
+    usage.attach(session, other)
+    try:
+        other.con.execute("DELETE FROM gateway_events")
+        with session_context(session):
+            assert usage.scalar("SELECT COUNT(*) FROM gateway_events") == 0
+        assert usage.scalar("SELECT COUNT(*) FROM gateway_events") > 0
+    finally:
+        session.end()
+    assert "other" not in usage._datasets
 
 
-def test_window_follows_the_passed_clock():
-    window_from, window_to, as_of = usage._window(NOW)
-    assert as_of == window_to == _stamp((NOW - usage.AS_OF_LAG).replace(second=0))
-    assert usage._parse(window_from) == usage._parse(as_of) - timedelta(days=usage.LOOKBACK_DAYS)
-
-
-def test_no_state_means_a_full_load():
-    assert usage._plan(None, NOW, FROM, "2026-09-30T11:55:00Z") == (False, "2026-09-30T11:55:00Z")
-
-
-def test_recent_state_is_incremental():
-    incremental, _ = usage._plan(_state(), NOW, FROM, _stamp(NOW))
-    assert incremental
-
-
-@pytest.mark.parametrize(("age", "incremental"), [
-    (usage.FULL_RELOAD_EVERY - timedelta(seconds=1), True),
-    (usage.FULL_RELOAD_EVERY, False),
-    (usage.FULL_RELOAD_EVERY + timedelta(hours=1), False),
-])
-def test_full_reload_after_24h(age, incremental):
-    got, _ = usage._plan(_state(full_at=NOW - age), NOW, FROM, _stamp(NOW))
-    assert got is incremental
-
-
-@pytest.mark.parametrize(("window_from", "incremental"), [
-    # watermark minus margin is exactly the window start: still covered
-    (_stamp(NOW - timedelta(minutes=5) - usage.REFETCH_MARGIN), True),
-    # the window has moved one second past it
-    ("2026-09-30T11:45:01Z", False),
-])
-def test_full_when_window_passes_the_watermark_margin(window_from, incremental):
-    got, _ = usage._plan(_state(), NOW, window_from, _stamp(NOW))
-    assert got is incremental
-
-
-def test_watermark_never_moves_backwards():
-    ahead = NOW + timedelta(minutes=3)
-    _, as_of = usage._plan(_state(as_of=ahead), NOW, FROM, _stamp(NOW))
-    assert as_of == _stamp(ahead)
-    _, as_of = usage._plan(_state(), NOW, FROM, _stamp(NOW))
-    assert as_of == _stamp(NOW)
-
-
-@pytest.fixture
-def fresh_state(loaded):
-    """Run a test with its own load state; put the shared one back after."""
-    saved = loaded._state
-    yield loaded
-    loaded._state = saved
-
-
-def test_first_load_without_a_snapshot_is_a_full_export(fresh_state, tmp_path, monkeypatch):
-    monkeypatch.setenv("GATEWAY_CACHE_DIR", str(tmp_path))
-    fresh_state._state = None
-    info = fresh_state._load()
-    assert (info["mode"], info["source"]) == ("full", "export")
-
-
-def test_first_load_takes_the_snapshot(fresh_state, tmp_path, monkeypatch):
-    monkeypatch.setenv("GATEWAY_CACHE_DIR", str(tmp_path))
-    fresh_state._write_snapshot(dict(fresh_state._state))
-    fresh_state._state = None
-    info = fresh_state._load()
-    assert (info["mode"], info["source"]) == ("incremental", "snapshot")
-
-
-def test_load_after_24h_rebuilds_in_full(fresh_state):
-    later = datetime.now(timezone.utc) + usage.FULL_RELOAD_EVERY + timedelta(minutes=1)
-    info = fresh_state._load(now=later)
-    assert (info["mode"], info["source"]) == ("full", "export")
-    assert info["full_at"] == later
+def test_queries_outside_a_session_with_a_dataset_are_refused():
+    with session_context(None), pytest.raises(RuntimeError, match="no dataset"):
+        usage.q("SELECT 1")

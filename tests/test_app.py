@@ -15,7 +15,7 @@ import pytest
 from conftest import APP, _free_port
 
 
-def test_ui_has_every_page_and_output(loaded):
+def test_ui_has_every_page_and_output():
     import app
 
     html = str(app.app_ui(None))

@@ -9,16 +9,22 @@ against the fake Connect.
 from __future__ import annotations
 
 import csv
+import html as html_lib
 import io
 import json
+import os
 import re
 from dataclasses import replace
+from datetime import date, timedelta
 from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
+from shiny.session import session_context
 
 import queries
-from conftest import viewed
+import usage
+from conftest import HISTORICAL_WINDOW, stub_session, viewed
+from filters import Filters
 from session import Reply, Session, browser_inputs, fetch_page, figure_traces, open_session, run
 
 # The outputs each page renders on first view. Attribution shows nothing until a
@@ -166,27 +172,60 @@ def test_spend_and_tokens_agree_across_pages(app_server, loaded, f, narrow):
         f"SELECT SUM(input_tokens) FROM gateway_events WHERE {where}", params)
 
 
-def test_refresh_reloads_in_the_background_and_says_so(app_server):
-    """The reload is an extended task: the button reports busy, then the new data."""
+def test_the_data_loads_in_the_background_and_the_page_is_told(app_server):
+    """The page opens empty; the load is a background task that ends with "loaded"."""
     async def scenario(session: Session, first: Reply, html: str):
-        reply = await session.update(refresh=1)
-        # The task finishes in a worker thread, possibly after the app first
-        # reports idle; its result comes in a busy/idle round of its own.
-        if not reply.notifications():
-            more = await session._drain()
-            reply.messages += more.messages
-        return reply
+        # What a browser has when it opens the page: choices and dates are not known yet.
+        assert 'id="f_users"' in html and "<option" not in html.split('id="f_users"')[1][:300]
+        return first
 
-    # A browser reports the button at 0 on load; the click is the change to 1.
-    reply = visit(app_server, scenario, refresh=0)
+    reply = visit(app_server, scenario)
     assert reply.errors == {}
-    notes = reply.notifications()
-    assert any("Loaded" in n and "records" in n for n in notes), notes
-    assert not any("Refresh failed" in n for n in notes)
-    # bslib's task button is told it is busy, then ready again.
-    states = [x["message"].get("state") for m in reply.messages
-              for x in m.get("inputMessages") or [] if x.get("id") == "refresh"]
-    assert states[:1] == ["busy"] and states[-1] == "ready", states
+    assert reply.is_loaded()
+    # The inputs are filled in once the data says what it holds.
+    filled = {x["id"] for m in reply.messages for x in m.get("inputMessages") or []}
+    assert {"f_users", "f_contents", "f_groups", "date_range"} <= filled
+    assert "records" in reply.values["topbar_meta"]["html"]
+
+
+def test_a_window_that_ended_before_today_opens_on_its_default_dates(
+    historical_app_server, monkeypatch,
+):
+    """A browser's date picker starts on today, which this data does not reach.
+    The first figures drawn are still those of the default chip."""
+    import app
+
+    for name, value in HISTORICAL_WINDOW.items():
+        monkeypatch.setenv(name, value)
+    dataset, session = usage.Dataset(os.environ["CONNECT_API_KEY"]), stub_session("historical")
+    dataset.load()
+    usage.attach(session, dataset)
+    try:
+        with session_context(session):
+            c = app.catalog()
+            start, end = app.preset_range(app.DEFAULT_PRESET, c["start"], c["end"])
+            f = Filters(start=start, end=end, all_users=tuple(c["users"]),
+                        all_contents=tuple(c["contents"]))
+            total, requests = queries.total_spend(f), queries.record_count(f)
+    finally:
+        session.end()
+    assert c["end"] < date.today() and requests > 0
+
+    reply = visit(historical_app_server, first_view)
+    assert reply.errors == {}
+    assert tiles(reply, "kpis")["Estimated spend"] == (f"${total:,.0f}", f"{requests:,} requests")
+    assert f"{requests:,} of" in reply.values["topbar_meta"]["html"]
+
+
+def test_a_failed_load_says_where_to_look_and_not_what_connect_said(app_server, fault):
+    import app
+
+    fault("export", "status:503")
+    reply = visit(app_server, first_view)
+    assert reply.is_loaded()  # the loading bar goes
+    (note,) = [html_lib.unescape(n) for n in reply.notifications()]
+    assert app.LOAD_FAILED in note
+    assert "http" not in note and "injected" not in note
 
 
 def test_csv_downloads_are_registered_and_streamed(app_server):
@@ -251,25 +290,50 @@ class TestBookmark:
         assert len(url) < 500  # a server refuses a request line past 8 KB; stay far inside
         assert json.loads(bookmark_query(url)["main_tabs"][0]) == "Adoption"
 
-    def test_url_state_round_trips(self, app_server, loaded):
+    # A chip's dates follow the data; dates picked by hand ("custom") are kept.
+    @pytest.mark.parametrize("preset", ["7d", "custom"])
+    def test_url_state_round_trips(self, app_server, loaded, preset):
+        import app
+
         picks = loaded.q("SELECT DISTINCT group_guid FROM user_groups ORDER BY 1"
                          ).group_guid.head(2).tolist()
+        c = app.catalog()
+        start, end = app.preset_range("7d", c["start"], c["end"])
+        if preset == "custom":
+            start, end = start - timedelta(days=20), end - timedelta(days=20)
+        dates = [start.isoformat(), end.isoformat()]
 
+        # The dates a browser reports once the chip has set them, or once a
+        # person has picked them.
         async def save(session: Session, first: Reply, html: str):
-            reply = await session.update(main_tabs="Adoption", f_groups=picks, preset="7d",
-                                         date_range=["2026-10-10", "2026-10-16"])
+            reply = await session.update(main_tabs="Adoption", f_groups=picks, preset=preset,
+                                         date_range=dates)
             return reply
 
         saved = visit(app_server, save)
         (url,) = saved.query_strings()
         query = bookmark_query(url)
         assert json.loads(query["f_groups"][0]) == picks
-        assert json.loads(query["preset"][0]) == "7d"
+        assert json.loads(query["preset"][0]) == preset
+        assert json.loads(query["date_range"][0]) == dates
 
         # A new visitor opens the saved address, sending the page's own defaults.
-        restored = visit(app_server, first_view, url="?" + urlsplit(url).query)
+        # The picks are put back once the data has loaded, and the browser reports them.
+        async def reopen(session: Session, first: Reply, html: str):
+            put_back = {m["id"]: m["message"]["value"] for msg in first.messages
+                        for m in msg.get("inputMessages") or []
+                        if m["id"].startswith("f_") and "value" in m["message"]}
+            assert put_back["f_groups"] == picks
+            first.add(await session.update(**put_back))
+            return first
+
+        restored = visit(app_server, reopen, url="?" + urlsplit(url).query)
         assert restored.errors == {}
-        assert restored.values["topbar_meta"]["html"] == saved.values["topbar_meta"]["html"]
+        # Each session loaded its own copy, at its own time.
+        def counted(reply: Reply) -> str:
+            return reply.values["topbar_meta"]["html"].split(" \u00b7 loaded")[0]
+
+        assert counted(restored) == counted(saved)
         assert pill_texts(restored) == pill_texts(saved)
         assert tiles(restored, "kpis") == tiles(saved, "kpis")
         assert re.search(r'nav-item active"[^>]*>Adoption</button>', restored.values["nav_rail"]["html"])
@@ -288,6 +352,28 @@ class TestBookmark:
         selected = [x["message"].get("value") for m in reply.messages
                     for x in m.get("inputMessages") or [] if x.get("id") == "main_tabs"]
         assert selected == [new]
+
+    @pytest.mark.parametrize("name, value", [
+        ("f_users", [{}]), ("f_contents", [1, 2]), ("f_groups", "a-group"), ("f_meta", 5),
+    ])
+    def test_a_malformed_filter_pick_is_dropped(self, app_server, name, value):
+        query = f"?_inputs_&{name}={quote(json.dumps(value))}"
+        # Shiny's own page builder refuses some of these addresses with a 500, so
+        # the inputs are those of the plain page; the session still restores the
+        # bookmark from the address.
+        html = fetch_page(app_server)
+
+        async def go():
+            async with open_session(app_server) as session:
+                return await session.init(browser_inputs(html), query)
+
+        reply = run(go())
+        assert reply.errors == {}
+        assert reply.notifications() == []
+        put_back = {x["id"]: x["message"].get("value") for m in reply.messages
+                    for x in m.get("inputMessages") or []}
+        assert put_back[name] == []
+        assert "records" in reply.values["topbar_meta"]["html"]
 
     def test_a_bookmark_naming_no_tab_opens_the_first_page(self, app_server):
         query = f"?_inputs_&main_tabs={quote(json.dumps('Nonesuch'))}"

@@ -62,14 +62,14 @@ ALL = Filters(start=date(2026, 9, 1), end=date(2026, 9, 30))
 
 @pytest.fixture
 def world(loaded, export, con, monkeypatch):
-    """usage pointed at a private connection holding ROWS, with groups and content names."""
+    """The dataset pointed at a private connection holding ROWS, with groups and content names."""
     usage._read_export(export(ROWS), WINDOW_FROM, WINDOW_TO, con)
     con.execute("CREATE TABLE content_names (content_guid VARCHAR, content_name VARCHAR)")
     con.execute("INSERT INTO content_names VALUES ('c1', 'Report')")
     con.execute("CREATE TABLE user_groups (user_guid VARCHAR, group_guid VARCHAR, group_name VARCHAR)")
     con.execute("""INSERT INTO user_groups VALUES ('guid-alice', 'g1', 'Analysts'),
                    ('guid-bob', 'g1', 'Analysts'), ('guid-alice', 'g2', 'Admins')""")
-    monkeypatch.setattr(usage, "_con", con)
+    monkeypatch.setattr(loaded, "con", con)
 
 
 # ---- what the data covers ---------------------------------------------------------
@@ -213,8 +213,8 @@ def test_hostile_filter_values_match_nothing_and_break_nothing(world):
     assert not queries.active_by_bucket(ALL, "username", "model", "day", [hostile]).empty
 
 
-def test_csv_export_binds_the_same_values(world):
-    path = usage.export_csv(queries.records_query(replace(ALL, users=("bob",))))
+def test_csv_export_binds_the_same_values(world, loaded):
+    path = loaded.export_csv(queries.records_query(replace(ALL, users=("bob",))))
     try:
         got = pd.read_csv(path)
     finally:

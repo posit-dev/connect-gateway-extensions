@@ -10,13 +10,15 @@ every chart then queries local data. The export holds metadata only. It never
 contains the text of a prompt or a reply.
 
 Connect builds the export on request, and the time that takes grows with the
-window: 17-30 s for 1.6M records. Each refresh exports the whole start-time
-window, then merges only recently ingested records locally. The full export is
-necessary because a call can be ingested long after it started; requesting only
-recent start-time partitions would omit it. The app rebuilds its local table
-from scratch every 24 hours. A Parquet snapshot in `.gateway-cache/` lets a
-restarted process reuse its existing rows, although catching up still requires
-a full-window export from Connect.
+window: 17-30 s for 1.6M records. Each visitor's session reads the export for
+itself, with that visitor's own API key, so the page shows a loading bar for
+that long when it opens. The data lives in the session's memory and is dropped
+when the session ends. Nothing is shared between visitors or saved to disk, and
+nothing is read until an administrator opens the dashboard.
+
+At most four sessions load at once; any others wait their turn. When a load
+fails, the page says so, and the reason is in the app's log (on Connect, the
+content's Logs tab).
 
 ## Install from the Gallery
 
@@ -39,13 +41,18 @@ a release.
 
 ## Configuration
 
-The app needs two environment variables:
+On Connect, the dashboard reads everything as the person viewing it, so it
+needs a Connect API integration (Max Role: Admin). Add one in System →
+Integrations, then add it to the content's Runtime settings. A visitor who is
+not an administrator, or a deployment with no integration, sees an access
+message and nothing is read.
+
+Connect sets `CONNECT_SERVER` for content that it runs. To run the app on your
+machine, set two environment variables yourself:
 
 - `CONNECT_SERVER` — the Connect URL, for example `http://localhost:3939`.
-- `CONNECT_API_KEY` — an administrator API key. The export needs this role.
-
-Connect sets both variables for content that it runs, so a deployed copy needs
-no setup. To run the app on your machine, set both variables yourself.
+- `CONNECT_API_KEY` — an administrator API key. With no visitor to act as, a
+  local run reads with this key.
 
 Two optional variables pin the export window. Without them, the window trails
 the clock by 90 days.
@@ -53,9 +60,6 @@ the clock by 90 days.
 - `GATEWAY_FROM` — the start of the window, in RFC 3339 UTC, for example
   `2026-09-10T00:00:00Z`.
 - `GATEWAY_TO` — the end of the window, in the same format.
-
-`GATEWAY_CACHE_DIR` moves the snapshot, for example to a shared mount that an
-administrator set up and that outlives deploys.
 
 ## Run locally
 
@@ -108,11 +112,8 @@ tar -C /tmp/backfill -cf - . | kubectl -n <ns> exec -i <connect-pod> -c connect 
 To remove the data, delete the `node=<node>` directories (the default node is
 `connect-backfill`). The node name is the only mark of the rows.
 
-A running dashboard only merges recently ingested records, and the backfilled
-rows have older ingest times. It shows them after its next full reload (every 24
-hours), or sooner if you change its `GATEWAY_FROM` or `GATEWAY_TO` setting,
-which restarts it with a full reload. A pinned `GATEWAY_FROM` hides rows before
-it.
+Each session reads the export when it opens, so the backfilled rows show the
+next time the page loads. A pinned `GATEWAY_FROM` hides rows before it.
 
 ## Develop
 
@@ -133,7 +134,7 @@ To rebuild the Connect exports after Connect's export changes, run
 `just connect-fixtures [path-to-connect-checkout]`. It runs the generator in
 `tests/fixtures/connect_export_fixture_test.go` inside a throwaway connect-dev
 container, with the checkout mounted read-only.
-Importing `usage` does nothing; `app.py` runs the first `usage.load()`.
+Importing `usage` does nothing; each session's `Dataset.load()` reads the data.
 
 The app's packages are pinned. Edit `requirements.in`, run `just lock` to
 regenerate `requirements.txt`, and run the tests on the oldest and newest Python
@@ -149,9 +150,10 @@ duckdb 1, and Python 3.11 and later pandas 3 and duckdb 2.
 The paths below are in `extensions/gateway-usage-dashboard/`. `app:app` is the entrypoint. `app.py` is the shell and the wiring. It builds
 the page frame and the filter drawer, keeps the state that every page shares,
 and starts each page's server. The shared state is the loaded-data catalog, the
-filter dict `flt()`, the data refresh, bookmarks and URL query state, the
+filter dict `flt()`, the data load, bookmarks and URL query state, the
 topbar, the unpriced-model checks, and the CSV export registration. It also
-defines the page order.
+defines the page order. The page is built empty and filled in once a session's
+data has loaded; everything that reads a filter waits for that.
 
 Each page lives in its own module and exposes `panel()`, its `nav_panel`, and
 `server(input, ctx)`:
@@ -164,12 +166,15 @@ Each page lives in its own module and exposes `panel()`, its `nav_panel`, and
 page server receives in place of importing `app.py`: `flt`, `cat`, `where`,
 `est_cost`, `register_export`, `formatted` and the rest.
 
-The helper modules hold no Shiny session state:
+The helper modules hold no Shiny session state of their own:
 
-- `usage.py` loads the export into DuckDB and reads Connect's price catalog
-  and content list.
-- `pricing.py` builds the spend SQL from the price catalog and rebuilds it
-  after a refresh.
+- `access.py` checks that the visitor is an administrator, and returns the API
+  key to read Connect with as them.
+- `usage.py` holds a `Dataset` per session: the visitor's own DuckDB copy of
+  the export, with Connect's price catalog, content list and groups, all read
+  with the visitor's key. `usage.q` and the other queries find the dataset of
+  the session they run in.
+- `pricing.py` builds the spend SQL from the session's price catalog.
 - `filters.py` turns the filter dict into a SQL `WHERE` clause and quotes
   values. It also holds `TOKEN_COUNT`, the SQL for a row's token count.
 - `conversations.py` groups requests into conversations from data frames,
