@@ -9,6 +9,7 @@ import urllib.parse
 import pytest
 
 import access
+import usage
 
 
 def _respond(routes):
@@ -24,19 +25,27 @@ def _respond(routes):
 def on_connect(monkeypatch):
     monkeypatch.setenv("CONNECT_SERVER", "http://connect")
     monkeypatch.setenv("CONNECT_API_KEY", "owner")
+    monkeypatch.setenv("POSIT_PRODUCT", "CONNECT")
     monkeypatch.setenv("CONNECT_CONTENT_GUID", "abc")
 
 
 def test_local_run_reads_with_the_configured_key(monkeypatch):
-    monkeypatch.delenv("CONNECT_CONTENT_GUID", raising=False)
+    monkeypatch.delenv("POSIT_PRODUCT", raising=False)
     monkeypatch.setenv("CONNECT_API_KEY", "mine")
     assert access.visitor_key({}) == "mine"
 
 
 def test_local_run_without_a_key_has_none(monkeypatch):
-    monkeypatch.delenv("CONNECT_CONTENT_GUID", raising=False)
+    monkeypatch.delenv("POSIT_PRODUCT", raising=False)
     monkeypatch.delenv("CONNECT_API_KEY", raising=False)
     assert access.visitor_key({}) == ""
+
+
+def test_connect_without_a_content_guid_is_denied(on_connect, monkeypatch):
+    monkeypatch.delenv("CONNECT_CONTENT_GUID")
+    with pytest.raises(access.Denied) as denied:
+        access.visitor_key({access.SESSION_TOKEN_HEADER: "t"})
+    assert str(denied.value) == access.NEEDS_INTEGRATION
 
 
 def test_no_session_token_needs_integration(on_connect):
@@ -135,3 +144,30 @@ def test_a_denied_visitor_gets_the_denial_page_and_nothing_is_fetched(on_connect
     page = str(app.app_ui(None))
     assert access.NEEDS_INTEGRATION in page
     assert "f_users" not in page and "records_table" not in page
+
+
+def _load_failure(monkeypatch, err):
+    import app
+
+    shown = []
+    monkeypatch.setattr(app.ui, "insert_ui", lambda *a, **k: shown.append(("screen", str(a[0]))))
+    monkeypatch.setattr(app.ui, "notification_show", lambda *a, **k: shown.append(("notice", a[0])))
+    app.report_load_failure(err)
+    return shown
+
+
+def test_a_forbidden_export_on_connect_shows_the_denial_screen(on_connect, monkeypatch):
+    shown = _load_failure(monkeypatch, usage.ExportForbidden("403"))
+    assert [kind for kind, _ in shown] == ["screen"]
+    assert access.NEEDS_ADMIN_ROLE in shown[0][1]
+
+
+def test_a_forbidden_export_off_connect_is_a_notification(monkeypatch):
+    monkeypatch.delenv("POSIT_PRODUCT", raising=False)
+    shown = _load_failure(monkeypatch, usage.ExportForbidden("403"))
+    assert [kind for kind, _ in shown] == ["notice"]
+
+
+def test_another_load_failure_on_connect_is_a_notification(on_connect, monkeypatch):
+    shown = _load_failure(monkeypatch, RuntimeError("boom"))
+    assert [kind for kind, _ in shown] == ["notice"]

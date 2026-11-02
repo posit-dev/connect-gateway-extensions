@@ -5,7 +5,7 @@ Connect decides what they can read and nothing is fetched before they arrive.
 On Connect each visitor must therefore come with a Visitor API Key integration,
 and must be an administrator, the role the usage export requires.
 
-Connect sets CONNECT_CONTENT_GUID for deployed content only. A copy run on a
+Connect sets POSIT_PRODUCT=CONNECT for deployed content. A copy run on a
 developer's machine has no visitor, so it reads with CONNECT_API_KEY instead.
 """
 
@@ -22,11 +22,14 @@ import usage
 SESSION_TOKEN_HEADER = "posit-connect-user-session-token"
 
 NEEDS_INTEGRATION = (
-    "This dashboard needs a Connect API integration (Max Role: Admin) to check who "
-    "is viewing it. Ask an administrator to add one in System \u2192 Integrations, "
-    "then add it to this content's Runtime settings."
+    "Before you are able to use this app, you need to add a "
+    "Connect Visitor API Key integration in the content settings."
 )
 NOT_ADMIN = "Only Connect administrators can view this dashboard."
+NEEDS_ADMIN_ROLE = (
+    "The Connect Visitor API Key integration does not allow the Admin role. Check "
+    "that the integration's Max Role is Admin."
+)
 
 
 class Denied(Exception):
@@ -49,14 +52,20 @@ def _request(url: str, key: str, data: dict | None = None) -> dict:
     return answer
 
 
+def on_connect() -> bool:
+    return os.environ.get("POSIT_PRODUCT") == "CONNECT"
+
+
 def visitor_key(headers) -> str:
     """An API key that acts as this visitor. Raises Denied when they may not view.
 
     A local run returns CONNECT_API_KEY, or "" when it is unset (loading then
     says what to set).
     """
-    if not os.environ.get("CONNECT_CONTENT_GUID"):
+    if not on_connect():
         return os.environ.get("CONNECT_API_KEY", "")
+    if not os.environ.get("CONNECT_CONTENT_GUID"):
+        raise Denied(NEEDS_INTEGRATION)
     token = headers.get(SESSION_TOKEN_HEADER)
     owner_key = os.environ.get("CONNECT_API_KEY")
     if not token or not owner_key:

@@ -581,6 +581,10 @@ _ADVICE = {
 }
 
 
+class ExportForbidden(RuntimeError):
+    """Connect refused the export (403): the key is not an administrator's."""
+
+
 def _download(url: str, key: str) -> Path:
     """GET the export once and stream it into a temporary Parquet file.
 
@@ -614,7 +618,7 @@ def _download(url: str, key: str) -> Path:
         reason = " ".join(err.read(2000).decode("utf-8", "replace").split())[:300]
         advice = _ADVICE.get(err.code, "check CONNECT_SERVER and CONNECT_API_KEY")
         detail = f"{err.code}: {reason}" if reason else str(err.code)
-        raise RuntimeError(
+        raise (ExportForbidden if err.code == 403 else RuntimeError)(
             f"cannot read the usage export at {url} -- {advice} ({detail})"
         ) from err
     except (OSError, http.client.HTTPException) as err:

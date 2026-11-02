@@ -204,6 +204,13 @@ def with_clear(name: str, control: ui.Tag) -> ui.Tag:
     )
 
 
+def denied_card(reason: str) -> ui.Tag:
+    return ui.div(
+        ui.div(ui.h4("Access denied"), ui.p(reason), class_="denied-card"),
+        class_="denied-body",
+    )
+
+
 def denied_page(reason: str) -> ui.Tag:
     """Why this visitor sees no dashboard, in the dashboard's own look."""
     return ui.page_fluid(
@@ -214,15 +221,27 @@ def denied_page(reason: str) -> ui.Tag:
         ),
         ui.div(
             ui.div(ui.div(brand(), class_="topbar-brand"), class_="topbar"),
-            ui.div(
-                ui.div(ui.h4("Access denied"), ui.p(reason), class_="denied-card"),
-                class_="denied-body",
-            ),
+            denied_card(reason),
             class_="app-shell",
         ),
         class_="p-0",
         title="Posit AI Gateway Usage",
     )
+
+
+def report_load_failure(err: Exception) -> None:
+    """Tell the visitor a load failed; the log has the reason."""
+    logger.error("The usage data could not be loaded", exc_info=err)
+    if isinstance(err, usage.ExportForbidden) and access.on_connect():
+        # Defense in depth: visitor_key checks the role, so this means the
+        # integration's Max Role is below Admin. Cover the dashboard with the
+        # same screen a denied visitor gets.
+        ui.insert_ui(
+            ui.div(denied_card(access.NEEDS_ADMIN_ROLE), class_="denied-overlay"),
+            selector="body", where="beforeEnd",
+        )
+    else:
+        ui.notification_show(LOAD_FAILED, type="error", duration=None)
 
 
 def app_ui(request: Request | None):
@@ -586,9 +605,8 @@ def server(input, output, session):
             ui.update_date_range("date_range", start=s, end=e, min=c["start"], max=c["end"])
             sent_dates.set((s, e))
             loaded.set(info)
-        except Exception:
-            logger.exception("The usage data could not be loaded")
-            ui.notification_show(LOAD_FAILED, type="error", duration=None)
+        except Exception as err:
+            report_load_failure(err)
         finally:
             await session.send_custom_message("loaded", {})
 

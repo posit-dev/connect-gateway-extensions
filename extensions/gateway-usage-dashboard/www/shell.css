@@ -301,6 +301,8 @@ body.drawer-open .filter-drawer {
   display: flex; align-items: center; justify-content: center;
   min-height: calc(100vh - var(--topbar-h)); padding: 24px;
 }
+/* The same screen laid over a dashboard that has already rendered. */
+.denied-overlay { position: fixed; inset: 0; z-index: 2000; background: var(--page); }
 .denied-card {
   max-width: 420px; padding: 16px 20px; background: var(--surface-1);
   border: 1px solid var(--hairline); border-radius: var(--radius);

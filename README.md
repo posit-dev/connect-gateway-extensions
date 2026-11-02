@@ -42,8 +42,9 @@ a release.
 ## Configuration
 
 On Connect, the dashboard reads everything as the person viewing it, so it
-needs a Connect API integration (Max Role: Admin). Add one in System →
-Integrations, then add it to the content's Runtime settings. A visitor who is
+needs a Connect Visitor API Key integration. Add one in the content's
+settings. Every Connect server has a "Connect Visitor API Key" integration with
+Max Role: Admin; a lower Max Role cannot read the usage export. A visitor who is
 not an administrator, or a deployment with no integration, sees an access
 message and nothing is read.
 
