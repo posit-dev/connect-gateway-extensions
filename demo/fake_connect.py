@@ -243,7 +243,7 @@ def make_rows(n: int = ROWS) -> pd.DataFrame:
                 dict(
                     start_time=t,
                     # Connect stamps ingest_time when it writes the record, which is
-                    # when the call finished. The dashboard's refresh keys on it.
+                    # when the call finished.
                     ingest_time=t + timedelta(milliseconds=duration_ms),
                     node_name="node-1",
                     provider=provider,

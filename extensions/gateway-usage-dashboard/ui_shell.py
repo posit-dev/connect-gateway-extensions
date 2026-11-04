@@ -175,43 +175,23 @@ def _drawer(*children, **_) -> ui.Tag:
     )
 
 
-def _shell(
-    *panels, sidebar, id, header, title, catalog, presets, default_preset, preset_range, **_
-) -> ui.Tag:
+def _shell(*panels, sidebar, id, header, title, presets, default_preset, **_) -> ui.Tag:
     """Page chrome: top bar, nav rail, global filter strip, then the page.
 
     The pages are a hidden navset so that the existing `main_tabs` id (and the
     bookmark that stores it) keeps working; the rail is what a reader clicks.
+    The dates are set once the data has loaded and says what it covers; until
+    then a browser shows today's date, which nothing reads (see flt in app.py).
     """
-    c = catalog
     topbar = ui.div(
         ui.div(title, class_="topbar-brand"),
         ui.output_ui("topbar_status"),
-        ui.div(
-            ui.output_ui("topbar_meta", inline=True),
-            # A task button: a refresh re-exports the whole window from Connect,
-            # which takes tens of seconds, so the button says so and stays
-            # disabled until the new data is in.
-            ui.input_task_button(
-                "refresh", "Refresh data", label_busy="Refreshing\u2026",
-                # "default": the btn-default look the action button had
-                type="default", class_="btn-sm refresh-btn",
-            ),
-            class_="topbar-load",
-        ),
+        ui.div(ui.output_ui("topbar_meta", inline=True), class_="topbar-load"),
         class_="topbar",
     )
     strip = ui.div(
         ui.input_radio_buttons("preset", None, presets, selected=default_preset, inline=True),
-        ui.input_date_range(
-            "date_range",
-            None,
-            start=preset_range(default_preset, c["start"], c["end"])[0],
-            end=c["end"],
-            min=c["start"],
-            max=c["end"],
-            separator="to",
-        ),
+        ui.input_date_range("date_range", None, start=None, end=None, separator="to"),
         ui.tags.button(
             "Filters",
             ui.span(class_="filter-dot"),

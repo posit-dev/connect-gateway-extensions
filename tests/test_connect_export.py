@@ -13,8 +13,7 @@ import pytest
 import pricing
 import usage
 from conftest import (
-    CONNECT_EXPORT, CONNECT_EXPORT_EARLY, EXPORT_SCHEMA, ROOT, WINDOW_FROM, WINDOW_TO,
-    parquet_schema,
+    CONNECT_EXPORT, EXPORT_SCHEMA, ROOT, WINDOW_FROM, WINDOW_TO, parquet_schema,
 )
 
 
@@ -85,26 +84,6 @@ def test_every_call_with_tokens_is_priced(events, con):
     i, o, cw, cr = prices[("aws.bedrock", "us", "claude-opus-4-1")]
     assert cost.est["viewer-content"] == pytest.approx(
         (1000 * i + 2000 * cw + 9000 * cr + 800 * o) / 1e6)
-
-
-def test_incremental_merge_matches_full_load(con):
-    # A load at 2026-09-20T12:00 saw the early export; the refresh merges the
-    # later one from that watermark less REFETCH_MARGIN.
-    usage._read_export(CONNECT_EXPORT_EARLY, WINDOW_FROM, WINDOW_TO, con)
-    early = set(con.sql("SELECT response_id FROM gateway_events").df().response_id)
-    assert "near-cutoff" in early and "late-ingest" not in early
-    cutoff = "2026-09-20T11:50:00Z"
-    added = usage._merge_export(CONNECT_EXPORT, WINDOW_FROM, WINDOW_TO, cutoff, con)
-    merged = con.sql("SELECT * FROM gateway_events ORDER BY response_id").df()
-
-    full = usage.new_connection()
-    try:
-        usage._read_export(CONNECT_EXPORT, WINDOW_FROM, WINDOW_TO, full)
-        expected = full.sql("SELECT * FROM gateway_events ORDER BY response_id").df()
-    finally:
-        full.close()
-    pd.testing.assert_frame_equal(merged, expected)
-    assert added == 3  # near-cutoff again, late-ingest, after-early
 
 
 def test_fake_connect_serves_connect_export_schema(fake_connect, tmp_path):

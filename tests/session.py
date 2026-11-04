@@ -13,6 +13,7 @@ import base64
 import json
 import re
 import urllib.request
+from datetime import date
 from html import unescape as html_unescape
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -43,6 +44,16 @@ class Reply:
             for m in self.messages
             if m.get("notification", {}).get("type") == "show"
         ]
+
+    def add(self, later: Reply) -> None:
+        """Fold in what the server sent after this reply."""
+        self.values.update(later.values)
+        self.errors.update(later.errors)
+        self.messages += later.messages
+
+    def is_loaded(self) -> bool:
+        """Whether the server has said the data is in (or that loading failed)."""
+        return any("loaded" in (m.get("custom") or {}) for m in self.messages)
 
     def query_strings(self) -> list[str]:
         """Each URL the app asked the browser to show, in order."""
@@ -128,7 +139,12 @@ class Session:
             **inputs,
         }
         await self._ws.send(json.dumps({"method": "init", "data": data}))
-        return await self._drain()
+        reply = await self._drain()
+        # The app is idle while its data loads in the background. The page is
+        # ready when the server says so, and what it draws arrives with that.
+        while not reply.is_loaded():
+            reply.add(await self._drain())
+        return reply
 
     async def update(self, **inputs) -> Reply:
         await self._ws.send(json.dumps({"method": "update", "data": inputs}))
@@ -154,10 +170,11 @@ async def open_session(base_url: str):
 def browser_inputs(html: str) -> dict[str, object]:
     """What a browser reports on load: each input's default, and every output visible.
 
-    Radio buttons give their checked choice, the date range its initial dates, the
-    checkbox filters their ticked boxes, and the selectize filters nothing. Pass the
-    HTML of a bookmarked address and these are the restored values. An output reported hidden is not rendered, so
-    all of them are reported visible.
+    Radio buttons give their checked choice, the date range its initial dates (or
+    today's, as a browser fills in a date with none), the checkbox filters their
+    ticked boxes, and the selectize filters nothing. Pass the HTML of a bookmarked
+    address and these are the restored values. An output reported hidden is not
+    rendered, so all of them are reported visible.
     """
     inputs: dict[str, object] = {
         f".clientdata_output_{i}_hidden": False for i in page_outputs(html)
@@ -166,8 +183,11 @@ def browser_inputs(html: str) -> dict[str, object]:
         r'<input type="radio" name="([^"]+)" value="([^"]*)" checked="checked"', html
     ):
         inputs[name] = value
-    box = html[html.index('id="date_range"'):]
-    inputs["date_range"] = re.findall(r'data-initial-date="([^"]+)"', box)[:2]
+    box = re.search(r'id="date_range".*?</div>', html, re.S)
+    assert box, "no date range on the page"
+    initial = [re.search(r'data-initial-date="([^"]+)"', tag)
+               for tag in re.findall(r"<input[^>]*>", box.group(0))]
+    inputs["date_range"] = [m.group(1) if m else date.today().isoformat() for m in initial]
     for name in ("f_users", "f_contents", "f_sessions", "f_groups"):  # selects: the selected
         box = re.search(rf'<select[^>]*id="{name}"[^>]*>(.*?)</select>', html, re.S)
         inputs[name] = [html_unescape(v) for v in re.findall(

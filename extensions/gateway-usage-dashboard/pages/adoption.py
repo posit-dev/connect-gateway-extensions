@@ -245,11 +245,15 @@ def server(input, ctx: PageContext):
 
     @render_widget
     def tool_time():
-        return active_by("tool", input.tool_grain() or "week", "No harness activity in this view")
+        grain = input.tool_grain()
+        return active_by("tool", grain if grain in ("day", "week", "month") else "week",
+                         "No harness activity in this view")
 
     @render_widget
     def model_time():
-        return active_by("model", input.model_grain() or "week", "No model usage in this view")
+        grain = input.model_grain()
+        return active_by("model", grain if grain in ("day", "week", "month") else "week",
+                         "No model usage in this view")
 
     ctx.register_export(
         "adoption",

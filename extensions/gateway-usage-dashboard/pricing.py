@@ -1,7 +1,7 @@
 """Price gateway request tokens with the current Connect price catalog.
 
-The SQL expressions operate on gateway_events rows. A refresh replaces
-usage.PRICES, which invalidates the expression caches by object identity.
+The SQL expressions operate on gateway_events rows. Each session's dataset keeps
+the ones built from its own catalog, and drops them with the session.
 """
 
 from __future__ import annotations
@@ -11,13 +11,6 @@ import usage
 # The export writes the provider as "anthropic" or "bedrock"; the price catalog
 # names Bedrock "aws.bedrock". Match either so a provider-keyed rate still fires.
 _PROVIDER_ALIASES = {"anthropic": ("anthropic",), "aws.bedrock": ("bedrock", "aws.bedrock")}
-
-
-def _prices() -> dict:
-    """usage.PRICES, which usage.load() always sets before anything prices a row."""
-    prices = usage.PRICES
-    assert prices is not None, "usage.load() has not run"
-    return prices
 
 
 def _rate_term(i: float, o: float, cw: float, cr: float) -> str:
@@ -90,38 +83,29 @@ def _build_case(prices: dict, term) -> str:
     return f"CASE {' '.join(whens)} ELSE 0 END / 1e6"
 
 
-# (prices object the SQL was built from, the SQL). The cache holds the object
-# itself, not id(prices): a freed catalog can pass its id() to a new object and
-# cause a wrong hit, but an `is` test on the object cannot.
-_EST_COST_CACHE: tuple = (object(), "")
-_NOCACHE_COST_CACHE: tuple = (object(), "")
+def _session_cost_sql(uncached: bool) -> str:
+    """The session's spend SQL, built once from its catalog and kept on its dataset."""
+    dataset = usage.current()
+    sql = dataset.cost_sql.get(uncached)
+    if sql is None:
+        # Dataset.load() always sets the catalog before anything prices a row.
+        assert dataset.prices is not None, "the dataset has not been loaded"
+        sql = dataset.cost_sql[uncached] = _build_est_cost(dataset.prices, uncached)
+    return sql
 
 
 def est_cost_uncached() -> str:
     """est_cost with no prompt-cache discount (see _build_est_cost)."""
-    global _NOCACHE_COST_CACHE
-    prices = _prices()
-    if _NOCACHE_COST_CACHE[0] is not prices:
-        _NOCACHE_COST_CACHE = (prices, _build_est_cost(prices, uncached=True))
-    return _NOCACHE_COST_CACHE[1]
+    return _session_cost_sql(uncached=True)
 
 
 def est_cost() -> str:
     """Estimated spend per row, as a SQL expression over gateway_events.
 
-    The SQL is rebuilt only when the catalog changes. A refresh replaces
-    usage.PRICES with a new object, which misses the cache and forces one
-    rebuild; every call in between reuses the string. With a catalog, the price
-    comes from (provider, region, model): the request's own region if it has a
-    listed rate, else the provider's base rate, else the model's Anthropic rate,
-    so a provider-name mismatch does not read $0. usage.load() refuses to start
-    without a catalog, so there is always one here.
+    The price comes from (provider, region, model): the request's own region if
+    it has a listed rate, else the provider's base rate, else the model's
+    Anthropic rate, so a provider-name mismatch does not read $0.
+    Dataset.load() refuses to finish without a catalog, so there is always one
+    here.
     """
-    global _EST_COST_CACHE
-    prices = _prices()
-    cached_prices, cached_sql = _EST_COST_CACHE
-    if cached_prices is prices:
-        return cached_sql
-    sql = _build_est_cost(prices)
-    _EST_COST_CACHE = (prices, sql)
-    return sql
+    return _session_cost_sql(uncached=False)

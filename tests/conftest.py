@@ -4,14 +4,15 @@ Tests give real inputs to real code; nothing here patches the app. Four kinds
 of input:
 
 - tests/fixtures/connect_export*.parquet: exports built by Connect's own code
-  (`just connect-fixtures`). CONNECT_EXPORT and CONNECT_EXPORT_EARLY name them.
+  (`just connect-fixtures`). CONNECT_EXPORT names the one the tests read.
 - `export`: a small Parquet file with exactly the real export's schema, holding
   just the rows a test describes. `shaped` loads such a file through the app's
   own `_SHAPE` into a private DuckDB connection.
 - `fake_connect`: demo/fake_connect.py, the same fake Connect `just run-local`
   uses, started once per session. Any test that uses it (directly or through
   `loaded`) is marked `connect` automatically, so `just test-fast` skips it.
-- `loaded`: the app's own data, loaded from the fake Connect by importing app.
+- `loaded`: a `usage.Dataset` loaded from the fake Connect, and attached to a
+  stand-in session so the queries find it as they do in the app.
 """
 
 from __future__ import annotations
@@ -25,13 +26,17 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import ModuleType
+from unittest.mock import MagicMock
 
 import duckdb
 import pandas as pd
 import pytest
+from shiny.module import ResolvedId
+from shiny.session import session_context
 
+import usage
 from filters import Filters, Params
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,11 +48,10 @@ WINDOW_FROM = "2026-09-01T00:00:00Z"
 WINDOW_TO = "2026-10-01T00:00:00Z"
 
 FIXTURES = ROOT / "tests" / "fixtures"
-# Exports Connect built for September 2026, at as_of 2026-10-01 and at
-# 2026-09-20T12:00; see tests/fixtures/connect_export_fixture_test.go for the
-# records, each named by its response_id.
+# The export Connect built for September 2026, at as_of 2026-10-01; see
+# tests/fixtures/connect_export_fixture_test.go for the records, each named by
+# its response_id.
 CONNECT_EXPORT = FIXTURES / "connect_export.parquet"
-CONNECT_EXPORT_EARLY = FIXTURES / "connect_export_early.parquet"
 
 
 def parquet_schema(path: Path) -> dict[str, str]:
@@ -225,7 +229,7 @@ def _running_app(env: dict[str, str]) -> Iterator[str]:
 
 
 @pytest.fixture(scope="session")
-def fake_connect(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+def fake_connect() -> Iterator[str]:
     """Start demo/fake_connect.py and point the app's environment at it.
 
     The fake caps list pages at 3 rows, so reading groups and their members
@@ -235,19 +239,63 @@ def fake_connect(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
             pytest.MonkeyPatch.context() as mp:
         mp.setenv("CONNECT_SERVER", url)
         mp.setenv("CONNECT_API_KEY", "test")
-        mp.setenv("GATEWAY_CACHE_DIR", str(tmp_path_factory.mktemp("gateway-cache")))
         mp.delenv("GATEWAY_FROM", raising=False)
         mp.delenv("GATEWAY_TO", raising=False)
         yield url
 
 
-@pytest.fixture(scope="session")
-def loaded(fake_connect: str) -> ModuleType:
-    """The usage module with the fake Connect's data loaded, as the app loads it."""
-    import app  # noqa: F401  # importing app runs the first usage.load()
-    import usage
+@pytest.fixture
+def fault(fake_connect: str) -> Iterator[Callable[[str, str], None]]:
+    """Make one route of the fake Connect fail: fault(route, mode). Reset after the test.
 
-    return usage
+    The modes are those of Handler._fault in demo/fake_connect.py.
+    """
+    def post(query: str) -> None:
+        urllib.request.urlopen(
+            urllib.request.Request(f"{fake_connect}/__fault__?{query}", method="POST")
+        ).read()
+
+    def set_(route: str, mode: str) -> None:
+        post(f"route={route}&mode={mode}")
+
+    yield set_
+    post("reset=1")
+
+
+def stub_session(id: str = "tests") -> MagicMock:
+    """A stand-in for a Shiny session, for code that runs outside one.
+
+    Shiny hands the current session to every reactive it creates, so it has to
+    take calls; `end()` runs what was given to `on_ended`.
+    """
+    session = MagicMock(name="session")
+    session.id = id
+    session.ns = ResolvedId("")  # Shiny enters the session's namespace with it
+    session.bookmark._restore_context = None  # nothing is being restored
+    ended: list = []
+    session.on_ended.side_effect = ended.append
+    session.end = lambda: [callback() for callback in ended]
+    return session
+
+
+SESSION = stub_session()
+
+
+@pytest.fixture(scope="session")
+def _dataset(fake_connect: str) -> Iterator[usage.Dataset]:
+    """One dataset from the fake Connect, read once and attached to SESSION."""
+    dataset = usage.Dataset(os.environ["CONNECT_API_KEY"])
+    dataset.load()
+    usage.attach(SESSION, dataset)
+    yield dataset
+    SESSION.end()
+
+
+@pytest.fixture
+def loaded(_dataset: usage.Dataset) -> Iterator[usage.Dataset]:
+    """The loaded dataset, current for the length of the test, as it is in a session."""
+    with session_context(SESSION):
+        yield _dataset
 
 
 @pytest.fixture
@@ -270,26 +318,41 @@ def viewed(f: Filters) -> tuple[str, dict]:
 
 
 @pytest.fixture(scope="session")
-def app_server(fake_connect: str, tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+def app_server(fake_connect: str) -> Iterator[str]:
     """`shiny run app:app` against the fake Connect, started once. Yields its URL.
 
     Tests open sessions on it with tests/session.py. Marked `app` (see pytest.ini).
     """
-    cache = tmp_path_factory.mktemp("app-cache")
-    with _running_app({**os.environ, "GATEWAY_CACHE_DIR": str(cache)}) as url:
+    with _running_app({**os.environ}) as url:
+        yield url
+
+
+# A window pinned with GATEWAY_FROM and GATEWAY_TO that ended weeks ago, so the
+# data stops well before the today a browser's date picker opens on.
+_HISTORICAL_TO = datetime.now(timezone.utc).replace(
+    hour=0, minute=0, second=0, microsecond=0) - timedelta(days=20)
+HISTORICAL_WINDOW = {
+    "GATEWAY_FROM": (_HISTORICAL_TO - timedelta(days=60)).strftime(usage._RFC3339),
+    "GATEWAY_TO": _HISTORICAL_TO.strftime(usage._RFC3339),
+}
+
+
+@pytest.fixture(scope="session")
+def historical_app_server(fake_connect: str) -> Iterator[str]:
+    """The app against the shared fake Connect, reading HISTORICAL_WINDOW. Yields its URL."""
+    with _running_app({**os.environ, **HISTORICAL_WINDOW}) as url:
         yield url
 
 
 @pytest.fixture(scope="session")
-def sparse_app_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+def sparse_app_server() -> Iterator[str]:
     """The app against a fake Connect in its "sparse" profile: no User-Agent, no
     Gateway-Metadata, almost nothing from content (see demo/fake_connect.py).
     What a real server can look like, and where empty charts and zero-divisions
     show up. Its own fake and app, so the shared ones keep their data.
     """
     with _running_fake(FAKE_ROWS="1500", FAKE_PROFILE="sparse") as fake:
-        env = {**os.environ, "CONNECT_SERVER": fake, "CONNECT_API_KEY": "test",
-               "GATEWAY_CACHE_DIR": str(tmp_path_factory.mktemp("sparse-cache"))}
+        env = {**os.environ, "CONNECT_SERVER": fake, "CONNECT_API_KEY": "test"}
         env.pop("GATEWAY_FROM", None)
         env.pop("GATEWAY_TO", None)
         with _running_app(env) as url:
@@ -297,14 +360,13 @@ def sparse_app_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]
 
 
 @pytest.fixture(scope="session")
-def empty_app_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+def empty_app_server() -> Iterator[str]:
     """The app against a Connect whose usage export has no rows: a server that
     has the gateway on and has not served a request yet. Its own fake and app,
     so the shared ones keep their data.
     """
     with _running_fake(FAKE_ROWS="0") as fake:
-        env = {**os.environ, "CONNECT_SERVER": fake, "CONNECT_API_KEY": "test",
-               "GATEWAY_CACHE_DIR": str(tmp_path_factory.mktemp("empty-cache"))}
+        env = {**os.environ, "CONNECT_SERVER": fake, "CONNECT_API_KEY": "test"}
         env.pop("GATEWAY_FROM", None)
         env.pop("GATEWAY_TO", None)
         with _running_app(env) as url:
@@ -317,7 +379,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         names = getattr(item, "fixturenames", ())
         if "fake_connect" in names:
             item.add_marker(pytest.mark.connect)
-        if "app_server" in names:
+        if "app_server" in names or "historical_app_server" in names:
             item.add_marker(pytest.mark.app)
         if "sparse_app_server" in names or "empty_app_server" in names:
             item.add_marker(pytest.mark.app)

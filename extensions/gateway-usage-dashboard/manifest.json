@@ -13,7 +13,7 @@
       "OAuth Integrations"
     ],
     "adminOnly": true,
-    "version": "0.1.2"
+    "version": "0.1.3"
   },
   "version": 1,
   "locale": "en_US.UTF-8",
@@ -44,8 +44,11 @@
     ".rscignore": {
       "checksum": "267a77458cc67f22bf2b6a3722c189c5"
     },
+    "access.py": {
+      "checksum": "c50936db7edafff1d2e32754f3733126"
+    },
     "app.py": {
-      "checksum": "a1c7929b6a1b80b2208ca1e88b7f681b"
+      "checksum": "534e12ec779c9f872b36250e2bcbc122"
     },
     "conversations.py": {
       "checksum": "2c2fbb2014ac8e9578d1a3fe2d50d095"
